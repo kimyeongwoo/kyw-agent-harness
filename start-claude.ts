@@ -10,4 +10,4 @@ try {
   process.exit(1);
 }
 
-await import('./src/mcp/claude-server.ts');
+await import('./src/mcp/claude-server.js');

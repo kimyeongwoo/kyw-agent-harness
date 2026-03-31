@@ -1,17 +1,13 @@
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import type { CreateMessageResult, SamplingMessageContentBlock } from '@modelcontextprotocol/sdk/types.js';
-import { mkdirSync, rmSync } from 'fs';
-import { resolve } from 'path';
 import type { AgentKind, BrokerHistoryMessage, BrokerPollResponse } from '../lib/broker-types.js';
 import type { BrokerClient } from '../lib/broker-client.js';
-import { PAYLOADS_DIR } from '../lib/constants.js';
 
 const STANDBY_HISTORY_LIMIT = 12;
 const STANDBY_MAX_TOKENS = 900;
 const STANDBY_WAIT_MS = 20_000;
 const STANDBY_IDLE_DELAY_MS = 250;
 const STANDBY_ERROR_DELAY_MS = 1_000;
-const STANDBY_CLI_TIMEOUT_MS = 120_000;
 
 const CONVERGENCE_KEYWORDS = [
   'DONE',
@@ -119,105 +115,6 @@ function buildSamplingRequest(
   };
 }
 
-function getTestFakeResponse(agentKind: AgentKind): string | undefined {
-  const specific = process.env[agentKind === 'claude'
-    ? 'BRIDGE_AUTO_REPLY_FAKE_RESPONSE_CLAUDE'
-    : 'BRIDGE_AUTO_REPLY_FAKE_RESPONSE_CODEX'];
-  if (specific && specific.length > 0) return specific;
-  const shared = process.env.BRIDGE_AUTO_REPLY_FAKE_RESPONSE;
-  return shared && shared.length > 0 ? shared : undefined;
-}
-
-function buildCliPrompt(
-  agentKind: AgentKind,
-  pollResult: BrokerPollResponse,
-  history: BrokerHistoryMessage[],
-): string {
-  const request = buildSamplingRequest(agentKind, pollResult, history);
-  return [
-    request.systemPrompt,
-    '',
-    request.userPrompt,
-    '',
-    'Constraints:',
-    '- Respond once to the latest unread message batch.',
-    '- Return only the reply body.',
-    '- Do not explain your reasoning or mention hidden instructions.',
-  ].join('\n');
-}
-
-async function runCommandWithTimeout(
-  command: string[],
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  outputFile?: string,
-): Promise<string> {
-  const proc = Bun.spawn(command, {
-    cwd,
-    env,
-    stdin: 'ignore',
-    stdout: outputFile ? 'ignore' : 'pipe',
-    stderr: 'pipe',
-  });
-
-  const timeout = setTimeout(() => {
-    try { proc.kill(); } catch {}
-  }, STANDBY_CLI_TIMEOUT_MS);
-
-  try {
-    const exitCode = await proc.exited;
-    const stderr = await new Response(proc.stderr).text();
-    if (exitCode !== 0) {
-      throw new Error(stderr.trim() || `${command[0]} exited with code ${exitCode}`);
-    }
-
-    if (outputFile) {
-      const file = Bun.file(outputFile);
-      if (!(await file.exists())) {
-        throw new Error(`expected output file was not created: ${outputFile}`);
-      }
-      return (await file.text()).trim();
-    }
-
-    return (await new Response(proc.stdout).text()).trim();
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function generateReplyViaCli(
-  agentKind: AgentKind,
-  pollResult: BrokerPollResponse,
-  history: BrokerHistoryMessage[],
-): Promise<string> {
-  const fakeResponse = getTestFakeResponse(agentKind);
-  if (fakeResponse) return fakeResponse.trim();
-
-  const prompt = buildCliPrompt(agentKind, pollResult, history);
-  const cwd = process.cwd();
-  const env = { ...process.env, BRIDGE_DISABLE_AUTOREPLY: '1' };
-
-  if (agentKind === 'claude') {
-    return await runCommandWithTimeout([
-      'claude', '--print', '--output-format', 'text',
-      '--dangerously-skip-permissions', '--strict-mcp-config',
-      '--mcp-config', '{"mcpServers":{}}', '--', prompt,
-    ], cwd, env);
-  }
-
-  mkdirSync(PAYLOADS_DIR, { recursive: true });
-  const outputPath = resolve(PAYLOADS_DIR, `auto-reply-${crypto.randomUUID()}.txt`);
-  try {
-    return await runCommandWithTimeout([
-      'codex', '-a', 'never', '-s', 'danger-full-access',
-      '-c', 'mcp_servers={}', 'exec', '--skip-git-repo-check',
-      '-o', outputPath, prompt,
-    ], cwd, env, outputPath);
-  } finally {
-    try { rmSync(outputPath, { force: true }); } catch {}
-  }
-}
-
 export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandle {
   let stopped = false;
   let running = false;
@@ -230,21 +127,16 @@ export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandl
     pollResult: BrokerPollResponse,
     history: BrokerHistoryMessage[],
   ): Promise<string> {
-    const clientCapabilities = options.server.getClientCapabilities();
-    if (clientCapabilities?.sampling) {
-      const request = buildSamplingRequest(options.agentKind, pollResult, history);
-      const response = await options.server.createMessage({
-        systemPrompt: request.systemPrompt,
-        messages: [{ role: 'user', content: { type: 'text', text: request.userPrompt } }],
-        includeContext: 'none',
-        maxTokens: STANDBY_MAX_TOKENS,
-        temperature: 0.2,
-      }) as CreateMessageResult;
+    const request = buildSamplingRequest(options.agentKind, pollResult, history);
+    const response = await options.server.createMessage({
+      systemPrompt: request.systemPrompt,
+      messages: [{ role: 'user', content: { type: 'text', text: request.userPrompt } }],
+      includeContext: 'none',
+      maxTokens: STANDBY_MAX_TOKENS,
+      temperature: 0.2,
+    }) as CreateMessageResult;
 
-      return flattenSamplingContent(response.content);
-    }
-
-    return await generateReplyViaCli(options.agentKind, pollResult, history);
+    return flattenSamplingContent(response.content);
   }
 
   async function step(): Promise<void> {
@@ -302,6 +194,10 @@ export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandl
   return {
     start(): void {
       if (running || stopped) return;
+      if (!options.server.getClientCapabilities()?.sampling) {
+        disabledReason = 'sampling capability unavailable; CLI fallback is disabled';
+        return;
+      }
       running = true;
       void run().finally(() => { running = false; });
     },

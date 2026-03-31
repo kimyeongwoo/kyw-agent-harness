@@ -6,6 +6,11 @@ const TEST_WORKSPACE = resolve(import.meta.dir, '.test-workspace-e2e');
 const PACKAGE_ROOT = resolve(import.meta.dir, '..');
 const CLAUDE_MCP = resolve(PACKAGE_ROOT, 'src', 'mcp', 'claude-server.ts');
 const CODEX_MCP = resolve(PACKAGE_ROOT, 'src', 'mcp', 'codex-server.ts');
+const TEST_RUN_ID = Date.now().toString(36);
+
+function slot(name: string): string {
+  return `${name}-${TEST_RUN_ID}`;
+}
 
 interface McpProcess {
   proc: ReturnType<typeof Bun.spawn>;
@@ -113,8 +118,8 @@ afterEach(() => {
 
 describe('E2E: Claude ↔ Codex via broker', () => {
   it('full roundtrip: Claude sends → Codex receives → Codex sends → Claude receives', async () => {
-    const claude = spawnMcp(CLAUDE_MCP);
-    const codex = spawnMcp(CODEX_MCP);
+    const claude = spawnMcp(CLAUDE_MCP, { BRIDGE_SLOT: slot('e2e-roundtrip') });
+    const codex = spawnMcp(CODEX_MCP, { BRIDGE_SLOT: slot('e2e-roundtrip') });
 
     try {
       await initializeMcp(claude);
@@ -153,7 +158,10 @@ describe('E2E: Claude ↔ Codex via broker', () => {
   }, 15000);
 
   it('health_check returns broker info', async () => {
-    const claude = spawnMcp(CLAUDE_MCP);
+    const claude = spawnMcp(CLAUDE_MCP, {
+      BRIDGE_DISABLE_AUTOREPLY: '0',
+      BRIDGE_SLOT: slot('e2e-health'),
+    });
 
     try {
       await initializeMcp(claude);
@@ -161,15 +169,81 @@ describe('E2E: Claude ↔ Codex via broker', () => {
       expect(health.server).toBe('claude-mcp');
       expect(health.broker_connected).toBe(true);
       expect(health.broker_pid).toBeGreaterThan(0);
-      expect(health.slot).toBe('e2e-test');
+      expect(health.slot).toBe(slot('e2e-health'));
+      expect(health.auto_reply_enabled).toBe(false);
+      expect(health.auto_reply_disabled_reason).toContain('sampling capability unavailable');
     } finally {
       killMcp(claude);
     }
   }, 10000);
 
+  it('wait_for_messages blocks until a peer sends a message', async () => {
+    const claude = spawnMcp(CLAUDE_MCP, { BRIDGE_SLOT: slot('e2e-wait') });
+    const codex = spawnMcp(CODEX_MCP, { BRIDGE_SLOT: slot('e2e-wait') });
+
+    try {
+      await initializeMcp(claude);
+      await initializeMcp(codex);
+
+      const waitPromise = callTool(codex, 'wait_for_messages', { timeout_ms: 5000 }) as Promise<{
+        has_new: boolean;
+        messages: Array<{ content: string }>;
+      }>;
+
+      await Bun.sleep(250);
+      await callTool(claude, 'reply', { text: 'Wake from Claude' });
+
+      const waited = await waitPromise;
+      expect(waited.has_new).toBe(true);
+      expect(waited.messages).toHaveLength(1);
+      expect(waited.messages[0].content).toBe('Wake from Claude');
+    } finally {
+      killMcp(claude);
+      killMcp(codex);
+    }
+  }, 15000);
+
+  it('message loop keeps watching until stopped', async () => {
+    const claude = spawnMcp(CLAUDE_MCP, { BRIDGE_SLOT: slot('e2e-message-loop') });
+    const codex = spawnMcp(CODEX_MCP, { BRIDGE_SLOT: slot('e2e-message-loop') });
+
+    try {
+      await initializeMcp(claude);
+      await initializeMcp(codex);
+
+      const started = await callTool(codex, 'start_message_loop') as { ok: boolean; started: boolean; running: boolean };
+      expect(started.ok).toBe(true);
+      expect(started.started).toBe(true);
+      expect(started.running).toBe(true);
+
+      await callTool(claude, 'reply', { text: 'Loop ping' });
+
+      let status = await callTool(codex, 'message_loop_status') as {
+        running: boolean;
+        notification_count: number;
+        last_notified_seq?: number;
+      };
+      for (let i = 0; i < 20 && status.notification_count === 0; i++) {
+        await Bun.sleep(150);
+        status = await callTool(codex, 'message_loop_status') as typeof status;
+      }
+
+      expect(status.running).toBe(true);
+      expect(status.notification_count).toBeGreaterThan(0);
+      expect(status.last_notified_seq).toBe(1);
+
+      const stopped = await callTool(codex, 'stop_message_loop') as { ok: boolean; stopped: boolean };
+      expect(stopped.ok).toBe(true);
+      expect(stopped.stopped).toBe(true);
+    } finally {
+      killMcp(claude);
+      killMcp(codex);
+    }
+  }, 15000);
+
   it('reset_session starts a fresh conversation', async () => {
-    const claude = spawnMcp(CLAUDE_MCP);
-    const codex = spawnMcp(CODEX_MCP);
+    const claude = spawnMcp(CLAUDE_MCP, { BRIDGE_SLOT: slot('e2e-reset') });
+    const codex = spawnMcp(CODEX_MCP, { BRIDGE_SLOT: slot('e2e-reset') });
 
     try {
       await initializeMcp(claude);

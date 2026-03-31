@@ -7,7 +7,7 @@ import {
   BRIDGE_SLOT_ENV,
   DEFAULT_BRIDGE_SLOT,
 } from './constants.js';
-import { detectMuxCommand, validatePaneTarget } from './platform.js';
+import { detectMuxCommand, discoverMuxPaneTarget, validatePaneTarget } from './platform.js';
 import type {
   AgentKind,
   BrokerEnqueueResponse,
@@ -65,8 +65,24 @@ export function getGitRoot(): string | undefined {
   }
 }
 
-export function resolveWakeMethod(paneTarget?: string): WakeMethod {
-  return paneTarget && validatePaneTarget(paneTarget) ? 'mux_send_keys' : 'none';
+function isLoopbackHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:') return false;
+    return url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1' || url.hostname === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
+export function resolveWakeMethod(target?: string): WakeMethod {
+  if (!target) return 'none';
+  if (isLoopbackHttpUrl(target)) return 'http_post';
+  return validatePaneTarget(target) ? 'mux_send_keys' : 'none';
+}
+
+interface BrokerClientOptions {
+  wakeTarget?: string;
 }
 
 class BrokerHttpError extends Error {
@@ -368,11 +384,14 @@ export class BrokerClient {
   private readonly slot = getBridgeSlot();
   private readonly workspaceRoot = getWorkspaceRoot();
   private readonly gitRoot = getGitRoot();
+  private readonly configuredWakeTarget?: string;
   private peerSession: BrokerPeerSession | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private registrationPromise: Promise<BrokerPeerSession> | null = null;
 
-  constructor(private readonly agentKind: AgentKind) {}
+  constructor(private readonly agentKind: AgentKind, options: BrokerClientOptions = {}) {
+    this.configuredWakeTarget = options.wakeTarget;
+  }
 
   async ensureRegistered(): Promise<BrokerPeerSession> {
     if (this.peerSession) {
@@ -517,11 +536,9 @@ export class BrokerClient {
   }
 
   private async resolvePaneTarget(): Promise<string | undefined> {
-    // No launcher session metadata in the new harness — just use mux detection
+    if (this.configuredWakeTarget) return this.configuredWakeTarget;
     const mux = detectMuxCommand();
     if (!mux) return undefined;
-    // If running inside a mux pane, the pane target is discoverable
-    // For now, return undefined (wake via http_post or none)
-    return undefined;
+    return discoverMuxPaneTarget();
   }
 }

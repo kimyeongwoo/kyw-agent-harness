@@ -40,8 +40,8 @@ export function wakeWaiters(conversationId: string, recipientKind?: AgentKind): 
     const key = waiterKey(conversationId, kind);
     const waiters = waiterMap.get(key);
     if (waiters && waiters.size > 0) {
-      for (const resolve of waiters) resolve();
-      waiters.clear();
+      waiterMap.delete(key);
+      for (const resolve of Array.from(waiters)) resolve();
     }
   }
 }
@@ -61,22 +61,40 @@ function registerWaiter(
 
   return new Promise<void>((resolve) => {
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let abortHandler: (() => void) | undefined;
+
+    const cleanup = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      waiters!.delete(doResolve);
+      if (waiters!.size === 0) {
+        waiterMap.delete(key);
+      }
+      if (signal && abortHandler) {
+        signal.removeEventListener('abort', abortHandler);
+        abortHandler = undefined;
+      }
+    };
+
     const settle = () => {
       if (settled) return;
       settled = true;
-      waiters!.delete(doResolve);
+      cleanup();
       resolve();
     };
 
     const doResolve = settle;
     waiters!.add(doResolve);
 
-    const timer = setTimeout(settle, waitMs);
+    timer = setTimeout(settle, waitMs);
     if (signal) {
-      signal.addEventListener('abort', () => {
-        clearTimeout(timer);
+      abortHandler = () => {
         settle();
-      }, { once: true });
+      };
+      signal.addEventListener('abort', abortHandler, { once: true });
     }
   });
 }

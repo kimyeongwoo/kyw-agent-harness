@@ -17,6 +17,12 @@ export function normalizeHistoryLimit(value: unknown): number {
   return Math.min(MAX_HISTORY_LIMIT, Math.floor(parsed));
 }
 
+export function normalizeWaitMs(value: unknown, defaultMs = 30_000, maxMs = 30_000): number {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return defaultMs;
+  return Math.min(maxMs, Math.floor(parsed));
+}
+
 export function collectRequiredAttachmentPaths(messages: Array<Pick<BridgeMessage, 'attachments'>>): string[] {
   return messages.flatMap((message) =>
     (message.attachments ?? [])

@@ -6,8 +6,10 @@ import type { HealthStatus } from '../lib/types.js';
 import { prepareMessagePayload } from '../lib/payloads.js';
 import { detectPlatform, isMuxAvailable } from '../lib/platform.js';
 import { BrokerClient } from '../lib/broker-client.js';
-import { collectRequiredAttachmentPaths, normalizeBatchSize, normalizeHistoryLimit, sendWakeup } from '../lib/adapter-utils.js';
+import { resolveWakeMethod } from '../lib/broker-client.js';
+import { collectRequiredAttachmentPaths, normalizeBatchSize, normalizeHistoryLimit, normalizeWaitMs, sendWakeup } from '../lib/adapter-utils.js';
 import { createStandbyLoop } from '../standby/loop.js';
+import { createMessageLoop } from '../standby/message-loop.js';
 import {
   CODEX_MCP_INSTANCE_DIR,
   DEFAULT_HISTORY_LIMIT,
@@ -28,10 +30,6 @@ const startTime = Date.now();
 let errorCount = 0;
 let lastError: string | undefined = undefined;
 let lastMessageAt: string | undefined = undefined;
-const brokerClient = new BrokerClient('codex');
-brokerClient.startHeartbeatLoop();
-
-let standbyLoop: ReturnType<typeof createStandbyLoop> | null = null;
 
 function refreshSingleInstanceWarning(opts?: { warn?: boolean }): boolean {
   registerCurrentInstance(CODEX_MCP_INSTANCE_DIR, INSTANCE_SLOT);
@@ -48,11 +46,22 @@ refreshSingleInstanceWarning({ warn: true });
 const server = new Server(
   { name: 'codex-mcp', version: '1.0.0' },
   {
-    capabilities: { tools: {} },
+    capabilities: { tools: {}, logging: {} },
     instructions:
-      'To read new messages from Claude, call check_messages. If a received message includes attachments with required=true, you must read those attachment documents before replying. To send a message back, call send_message.',
+      'To read new messages from Claude, call check_messages. When idle, prefer wait_for_messages so you can block until a new message arrives instead of polling. For continuous background monitoring until stopped, use start_message_loop and stop_message_loop. If a received message includes attachments with required=true, you must read those attachment documents before replying. To send a message back, call send_message.',
   },
 );
+const brokerClient = new BrokerClient('codex');
+brokerClient.startHeartbeatLoop();
+
+let standbyLoop: ReturnType<typeof createStandbyLoop> | null = null;
+const messageLoop = createMessageLoop({
+  agentKind: 'codex',
+  brokerClient,
+  server,
+  isSingleInstanceSafe: () => !refreshSingleInstanceWarning(),
+  logPrefix: '[codex-mcp]',
+});
 
 if (!AUTO_REPLY_DISABLED_BY_ENV) {
   standbyLoop = createStandbyLoop({
@@ -96,6 +105,42 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'wait_for_messages',
+      description: 'Wait until Claude sends a new message to Codex, or until timeout.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          max_messages: {
+            type: 'integer',
+            minimum: 1,
+            maximum: MAX_MESSAGE_BATCH_SIZE,
+            description: `Optional max unread messages to return. Defaults to ${DEFAULT_MESSAGE_BATCH_SIZE}.`,
+          },
+          timeout_ms: {
+            type: 'integer',
+            minimum: 0,
+            maximum: 30000,
+            description: 'Optional wait timeout in milliseconds. Defaults to 30000.',
+          },
+        },
+      },
+    },
+    {
+      name: 'start_message_loop',
+      description: 'Start a background loop that continuously watches for new bridge messages until stopped.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'stop_message_loop',
+      description: 'Stop the background message loop.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'message_loop_status',
+      description: 'Return current background message loop status.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
       name: 'get_history',
       description: 'Get the full conversation history between Claude and Codex.',
       inputSchema: {
@@ -132,10 +177,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
-  if (name === 'check_messages') {
+  if (name === 'check_messages' || name === 'wait_for_messages') {
     try {
       const maxMessages = normalizeBatchSize((args as { max_messages?: number } | undefined)?.max_messages);
-      const pollResult = await brokerClient.pollInbox(maxMessages, 0);
+      const waitMs = name === 'wait_for_messages'
+        ? normalizeWaitMs((args as { timeout_ms?: number } | undefined)?.timeout_ms)
+        : 0;
+      const pollResult = await brokerClient.pollInbox(maxMessages, waitMs);
 
       if (pollResult.messages.length === 0) {
         return { content: [{ type: 'text', text: JSON.stringify({ has_new: false }) }] };
@@ -234,6 +282,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 
+  if (name === 'start_message_loop') {
+    const started = messageLoop.start();
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ ok: true, started, running: messageLoop.getStatus().running }) }],
+    };
+  }
+
+  if (name === 'stop_message_loop') {
+    const stopped = messageLoop.stop();
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ ok: true, stopped, running: messageLoop.getStatus().running }) }],
+    };
+  }
+
+  if (name === 'message_loop_status') {
+    return {
+      content: [{ type: 'text', text: JSON.stringify(messageLoop.getStatus()) }],
+    };
+  }
+
   if (name === 'reset_session') {
     const { confirm } = args as { confirm: boolean };
     if (!confirm) return { content: [{ type: 'text', text: 'Reset cancelled.' }] };
@@ -249,6 +317,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { peer, broker } = await brokerClient.health();
     const otherInstance = refreshSingleInstanceWarning();
     const standbyStatus = standbyLoop?.getStatus();
+    const messageLoopStatus = messageLoop.getStatus();
     const health: HealthStatus = {
       server: SERVER_NAME,
       pid: process.pid,
@@ -266,11 +335,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       broker_pid: broker?.pid,
       broker_port: broker?.port,
       broker_uptime_ms: broker?.uptime_ms,
+      pane_target: peer?.pane_target,
+      wake_method: resolveWakeMethod(peer?.pane_target),
       multi_instance_warning: otherInstance,
       auto_reply_enabled: standbyStatus?.enabled,
       auto_reply_disabled_reason: standbyStatus?.disabled_reason,
       auto_reply_last_reply_at: standbyStatus?.last_reply_at,
       auto_reply_last_error: standbyStatus?.last_error,
+      message_loop_running: messageLoopStatus.running,
+      message_loop_last_error: messageLoopStatus.last_error,
+      message_loop_last_notified_seq: messageLoopStatus.last_notified_seq,
+      message_loop_last_notified_at: messageLoopStatus.last_notified_at,
+      message_loop_notification_count: messageLoopStatus.notification_count,
     };
     return { content: [{ type: 'text', text: JSON.stringify(health) }] };
   }
@@ -287,6 +363,7 @@ process.on('exit', () => {
 
 const shutdown = () => {
   standbyLoop?.stop();
+  messageLoop.stop();
   brokerClient.stopHeartbeatLoop();
   process.exit(0);
 };

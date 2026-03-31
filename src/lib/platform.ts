@@ -55,6 +55,20 @@ export function validatePaneTarget(pane: string): string | null {
   return pane;
 }
 
+export function discoverMuxPaneTarget(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const explicitTarget = env.BRIDGE_PANE_TARGET?.trim();
+  if (explicitTarget) {
+    return validatePaneTarget(explicitTarget) ?? undefined;
+  }
+
+  const tmuxPane = env.TMUX_PANE?.trim();
+  if (tmuxPane) {
+    return validatePaneTarget(tmuxPane) ?? undefined;
+  }
+
+  return undefined;
+}
+
 async function muxSendKeysReal(paneTarget: string, text: string): Promise<boolean> {
   const cmd = detectMuxCommand();
   if (!cmd) {
