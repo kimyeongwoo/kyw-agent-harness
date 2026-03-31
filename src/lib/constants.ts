@@ -1,0 +1,20 @@
+import { resolve } from 'path';
+
+export const BRIDGE_DIR = resolve(process.cwd(), '.bridge');
+export const RUNTIME_DIR = resolve(BRIDGE_DIR, 'runtime');
+export const PAYLOADS_DIR = resolve(BRIDGE_DIR, 'payloads');
+export const BROKER_DB_FILE = resolve(BRIDGE_DIR, 'broker.db');
+export const BROKER_LOG_FILE = resolve(BRIDGE_DIR, 'broker.log');
+export const BROKER_RUNTIME_FILE = resolve(RUNTIME_DIR, 'broker.json');
+export const BROKER_LOCK_FILE = resolve(RUNTIME_DIR, 'broker.lock');
+export const CLAUDE_MCP_INSTANCE_DIR = resolve(BRIDGE_DIR, 'claude-mcp.instances');
+export const CODEX_MCP_INSTANCE_DIR = resolve(BRIDGE_DIR, 'codex-mcp.instances');
+export const DEFAULT_MESSAGE_BATCH_SIZE = 200;
+export const MAX_MESSAGE_BATCH_SIZE = 1000;
+export const DEFAULT_HISTORY_LIMIT = 200;
+export const MAX_HISTORY_LIMIT = 2000;
+export const MESSAGE_ATTACHMENT_CHAR_THRESHOLD = 10000;
+export const BRIDGE_SLOT_ENV = 'BRIDGE_SLOT';
+export const DEFAULT_BRIDGE_SLOT = 'default';
+export const BROKER_PEER_STALE_MS = 60_000;
+export const BROKER_WAKE_DEBOUNCE_MS = 750;

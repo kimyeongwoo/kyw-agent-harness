@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.bridge/
+*.out
+*.err
+*.log

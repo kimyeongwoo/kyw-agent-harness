@@ -1,0 +1,34 @@
+{
+  "name": "@kimyw/kyw-agent-harness",
+  "version": "1.0.0",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "bun": ">=1.0.0",
+    "node": ">=18"
+  },
+  "bin": {
+    "kah": "bin/kah.cjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "scripts/",
+    "start-claude.ts",
+    "start-codex.ts"
+  ],
+  "scripts": {
+    "test": "bun test --max-concurrency 1",
+    "build": "bun build --target=bun src/mcp/claude-server.ts src/mcp/codex-server.ts --outdir=dist",
+    "start:claude": "bun start-claude.ts",
+    "start:codex": "bun start-codex.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
