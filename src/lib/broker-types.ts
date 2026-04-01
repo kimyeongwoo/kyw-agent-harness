@@ -85,6 +85,14 @@ export interface BrokerHealthResponse {
   backend: 'broker';
 }
 
+export interface BrokerReceiptState {
+  conversation_id: string;
+  recipient_kind: AgentKind;
+  last_ack_seq: number;
+  last_auto_reply_seq: number;
+  updated_at: string;
+}
+
 export interface BrokerInspectionPeer {
   peer_id: string;
   agent_kind: AgentKind;
@@ -97,6 +105,7 @@ export interface BrokerInspectionPeer {
 export interface BrokerInspectionReceipt {
   recipient_kind: AgentKind;
   last_ack_seq: number;
+  last_auto_reply_seq: number;
   updated_at: string;
 }
 

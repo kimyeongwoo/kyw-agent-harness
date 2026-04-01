@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS receipts (
   conversation_id TEXT NOT NULL,
   recipient_kind TEXT NOT NULL CHECK (recipient_kind IN ('claude', 'codex')),
   last_ack_seq INTEGER NOT NULL DEFAULT 0,
+  last_auto_reply_seq INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (conversation_id, recipient_kind),
   FOREIGN KEY (conversation_id) REFERENCES conversations(conversation_id)

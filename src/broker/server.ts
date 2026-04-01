@@ -193,6 +193,23 @@ export async function startBrokerServer(): Promise<void> {
           return jsonResponse({ ok: true });
         }
 
+        if (request.method === 'POST' && url.pathname === '/get-receipt-state') {
+          const body = await parseRequestJson<{
+            conversation_id: string;
+            recipient_kind: AgentKind;
+          }>(request);
+          return jsonResponse(store.getReceiptState(body.conversation_id, body.recipient_kind));
+        }
+
+        if (request.method === 'POST' && url.pathname === '/mark-auto-reply-handled') {
+          const body = await parseRequestJson<{
+            conversation_id: string;
+            recipient_kind: AgentKind;
+            handled_seq: number;
+          }>(request);
+          return jsonResponse(store.markAutoReplyHandled(body.conversation_id, body.recipient_kind, body.handled_seq));
+        }
+
         if (request.method === 'POST' && url.pathname === '/enqueue-message') {
           const body = await parseRequestJson<{
             conversation_id: string;
@@ -202,6 +219,7 @@ export async function startBrokerServer(): Promise<void> {
             recipient_kind: AgentKind;
             content: string;
             attachments?: MessageAttachment[];
+            automation_handled_seq?: number;
           }>(request);
           const enqueueResult = store.enqueueMessage(body);
           wakeWaiters(body.conversation_id, body.recipient_kind);

@@ -14,12 +14,13 @@ import type {
   BrokerEnqueueResponse,
   BrokerHealthResponse,
   BrokerHistoryResponse,
-  BrokerWorkspaceInspectionOptions,
   BrokerPeerSession,
   BrokerPollResponse,
+  BrokerReceiptState,
   BrokerResetResponse,
   BrokerRuntimeManifest,
   BrokerWorkspaceInspection,
+  BrokerWorkspaceInspectionOptions,
   WakeMethod,
 } from './broker-types.js';
 import type { MessageAttachment } from './types.js';
@@ -462,11 +463,35 @@ export class BrokerClient {
     });
   }
 
+  async getReceiptState(): Promise<BrokerReceiptState> {
+    const session = await this.ensureRegistered();
+    return await brokerRequest<BrokerReceiptState>('/get-receipt-state', {
+      method: 'POST',
+      body: JSON.stringify({
+        conversation_id: session.conversation_id,
+        recipient_kind: this.agentKind,
+      }),
+    });
+  }
+
+  async markAutoReplyHandled(handledSeq: number): Promise<BrokerReceiptState> {
+    const session = await this.ensureRegistered();
+    return await brokerRequest<BrokerReceiptState>('/mark-auto-reply-handled', {
+      method: 'POST',
+      body: JSON.stringify({
+        conversation_id: session.conversation_id,
+        recipient_kind: this.agentKind,
+        handled_seq: handledSeq,
+      }),
+    });
+  }
+
   async enqueueMessage(options: {
     messageId: string;
     recipientKind: AgentKind;
     content: string;
     attachments?: MessageAttachment[];
+    automationHandledSeq?: number;
   }): Promise<BrokerEnqueueResponse> {
     const session = await this.ensureRegistered();
     const response = await brokerRequest<BrokerEnqueueResponse>('/enqueue-message', {
@@ -479,6 +504,7 @@ export class BrokerClient {
         recipient_kind: options.recipientKind,
         content: options.content,
         attachments: options.attachments,
+        automation_handled_seq: options.automationHandledSeq,
       }),
     });
     session.conversation_id = response.conversation_id;

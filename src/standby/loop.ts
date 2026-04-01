@@ -163,6 +163,15 @@ function buildSamplingRequest(
   };
 }
 
+function filterUnhandledMessages(pollResult: BrokerPollResponse, handledSeq: number): BrokerPollResponse {
+  const unhandledMessages = pollResult.messages.filter((message) => message.seq > handledSeq);
+  return {
+    ...pollResult,
+    messages: unhandledMessages,
+    max_seq: unhandledMessages[unhandledMessages.length - 1]?.seq ?? handledSeq,
+  };
+}
+
 export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandle {
   let stopped = false;
   let running = false;
@@ -215,20 +224,26 @@ export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandl
       return;
     }
 
-    if (pollResult.max_seq <= lastHandledSeq) {
+    const receipt = await options.brokerClient.getReceiptState();
+    const handledSeq = Math.max(lastHandledSeq, receipt.last_auto_reply_seq);
+    const pendingPollResult = filterUnhandledMessages(pollResult, handledSeq);
+
+    if (pendingPollResult.messages.length === 0) {
+      lastHandledSeq = handledSeq;
       await options.brokerClient.ackInbox(pollResult.max_seq);
       await Bun.sleep(STANDBY_IDLE_DELAY_MS);
       return;
     }
 
     const history = await options.brokerClient.getHistory(STANDBY_HISTORY_LIMIT);
-    const requiredAttachmentDocs = await readRequiredAttachmentDocuments(pollResult);
-    const replyDirective = parseReplyDirective(await generateReply(pollResult, history.messages, requiredAttachmentDocs));
+    const requiredAttachmentDocs = await readRequiredAttachmentDocuments(pendingPollResult);
+    const replyDirective = parseReplyDirective(await generateReply(pendingPollResult, history.messages, requiredAttachmentDocs));
 
     if (replyDirective.stopWithoutReply) {
-      lastHandledSeq = pollResult.max_seq;
+      await options.brokerClient.markAutoReplyHandled(pendingPollResult.max_seq);
+      lastHandledSeq = pendingPollResult.max_seq;
       lastError = undefined;
-      await options.brokerClient.ackInbox(pollResult.max_seq);
+      await options.brokerClient.ackInbox(pendingPollResult.max_seq);
       terminate('conversation concluded with no further reply required');
       return;
     }
@@ -237,12 +252,13 @@ export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandl
       messageId: crypto.randomUUID(),
       recipientKind: options.agentKind === 'claude' ? 'codex' : 'claude',
       content: replyDirective.replyText!,
+      automationHandledSeq: pendingPollResult.max_seq,
     });
 
-    lastHandledSeq = pollResult.max_seq;
+    lastHandledSeq = pendingPollResult.max_seq;
     lastReplyAt = new Date().toISOString();
     lastError = undefined;
-    await options.brokerClient.ackInbox(pollResult.max_seq);
+    await options.brokerClient.ackInbox(pendingPollResult.max_seq);
 
     if (replyDirective.stopAfterReply) {
       terminate('conversation concluded after final reply');

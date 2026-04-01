@@ -37,6 +37,20 @@ describe('createStandbyLoop', () => {
       brokerClient: {
         pollInbox: async () => createPollResult(),
         getHistory: async () => ({ messages: [], returned_messages: 0, has_more: false, limit: 12 }),
+        getReceiptState: async () => ({
+          conversation_id: 'conv_test',
+          recipient_kind: 'codex',
+          last_ack_seq: 0,
+          last_auto_reply_seq: 0,
+          updated_at: new Date().toISOString(),
+        }),
+        markAutoReplyHandled: async () => ({
+          conversation_id: 'conv_test',
+          recipient_kind: 'codex',
+          last_ack_seq: 0,
+          last_auto_reply_seq: 1,
+          updated_at: new Date().toISOString(),
+        }),
         enqueueMessage: async (message: { content: string }) => {
           enqueued.push(message);
           return { conversation_id: 'conv_test', message_id: 'reply_1', seq: 2 };
@@ -69,6 +83,20 @@ describe('createStandbyLoop', () => {
       brokerClient: {
         pollInbox: async () => createPollResult(),
         getHistory: async () => ({ messages: [], returned_messages: 0, has_more: false, limit: 12 }),
+        getReceiptState: async () => ({
+          conversation_id: 'conv_test',
+          recipient_kind: 'claude',
+          last_ack_seq: 0,
+          last_auto_reply_seq: 0,
+          updated_at: new Date().toISOString(),
+        }),
+        markAutoReplyHandled: async () => ({
+          conversation_id: 'conv_test',
+          recipient_kind: 'claude',
+          last_ack_seq: 0,
+          last_auto_reply_seq: 1,
+          updated_at: new Date().toISOString(),
+        }),
         enqueueMessage: async (message: { content: string }) => {
           enqueued.push(message);
           return { conversation_id: 'conv_test', message_id: 'reply_1', seq: 2 };
@@ -111,6 +139,20 @@ describe('createStandbyLoop', () => {
           return { conversation_id: 'conv_test', messages: [], max_seq: 1, has_more: false };
         },
         getHistory: async () => ({ messages: [], returned_messages: 0, has_more: false, limit: 12 }),
+        getReceiptState: async () => ({
+          conversation_id: 'conv_test',
+          recipient_kind: 'codex',
+          last_ack_seq: 0,
+          last_auto_reply_seq: 0,
+          updated_at: new Date().toISOString(),
+        }),
+        markAutoReplyHandled: async () => ({
+          conversation_id: 'conv_test',
+          recipient_kind: 'codex',
+          last_ack_seq: 0,
+          last_auto_reply_seq: 1,
+          updated_at: new Date().toISOString(),
+        }),
         enqueueMessage: async () => ({ conversation_id: 'conv_test', message_id: 'reply_1', seq: 2 }),
         ackInbox: async () => {},
       } as any,

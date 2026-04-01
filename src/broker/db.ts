@@ -16,6 +16,7 @@ import type {
   BrokerPeerSession,
   BrokerPollMessage,
   BrokerPollResponse,
+  BrokerReceiptState,
   BrokerResetResponse,
   BrokerWorkspaceInspectionOptions,
   BrokerWorkspaceInspection,
@@ -56,6 +57,7 @@ interface ReceiptRow {
   conversation_id: string;
   recipient_kind: AgentKind;
   last_ack_seq: number;
+  last_auto_reply_seq: number;
   updated_at: string;
 }
 
@@ -109,6 +111,7 @@ export class BrokerStore {
     mkdirSync(resolve(dbPath, '..'), { recursive: true });
     this.db = new Database(dbPath, { create: true });
     this.db.exec(BROKER_SCHEMA_SQL);
+    this.ensureMigrations();
   }
 
   close(): void {
@@ -232,13 +235,28 @@ export class BrokerStore {
   }
 
   ackInbox(conversationId: string, recipientKind: AgentKind, ackSeq: number): void {
-    const receipt = this.ensureReceipt(conversationId, recipientKind, 0);
+    const receipt = this.ensureReceipt(conversationId, recipientKind, 0, 0);
     const updatedAt = nowIso();
     this.db.query(
       `UPDATE receipts
        SET last_ack_seq = ?, updated_at = ?
        WHERE conversation_id = ? AND recipient_kind = ?`,
     ).run(Math.max(receipt.last_ack_seq, ackSeq), updatedAt, conversationId, recipientKind);
+  }
+
+  getReceiptState(conversationId: string, recipientKind: AgentKind): BrokerReceiptState {
+    return this.ensureReceipt(conversationId, recipientKind, 0, 0);
+  }
+
+  markAutoReplyHandled(conversationId: string, recipientKind: AgentKind, handledSeq: number): BrokerReceiptState {
+    const receipt = this.ensureReceipt(conversationId, recipientKind, 0, 0);
+    const updatedAt = nowIso();
+    this.db.query(
+      `UPDATE receipts
+       SET last_auto_reply_seq = ?, updated_at = ?
+       WHERE conversation_id = ? AND recipient_kind = ?`,
+    ).run(Math.max(receipt.last_auto_reply_seq, handledSeq), updatedAt, conversationId, recipientKind);
+    return this.ensureReceipt(conversationId, recipientKind, 0, 0);
   }
 
   enqueueMessage(input: {
@@ -249,6 +267,7 @@ export class BrokerStore {
     recipient_kind: AgentKind;
     content: string;
     attachments?: MessageAttachment[];
+    automation_handled_seq?: number;
   }): BrokerEnqueueResponse {
     const senderPeer = this.getPeer(input.sender_peer_id);
     if (!senderPeer || senderPeer.status !== 'active') {
@@ -291,6 +310,20 @@ export class BrokerStore {
       this.db.query(
         'UPDATE conversations SET last_message_seq = ?, updated_at = ? WHERE conversation_id = ?',
       ).run(seq, createdAt, input.conversation_id);
+
+      if (typeof input.automation_handled_seq === 'number') {
+        const senderReceipt = this.ensureReceipt(input.conversation_id, input.sender_kind, 0, 0);
+        this.db.query(
+          `UPDATE receipts
+           SET last_auto_reply_seq = ?, updated_at = ?
+           WHERE conversation_id = ? AND recipient_kind = ?`,
+        ).run(
+          Math.max(senderReceipt.last_auto_reply_seq, input.automation_handled_seq),
+          createdAt,
+          input.conversation_id,
+          input.sender_kind,
+        );
+      }
 
       const recipientPeer = this.db.query(
         `SELECT pane_target, wake_method
@@ -403,7 +436,7 @@ export class BrokerStore {
       }>;
 
       const receipts = this.db.query(
-        `SELECT recipient_kind, last_ack_seq, updated_at
+        `SELECT recipient_kind, last_ack_seq, last_auto_reply_seq, updated_at
          FROM receipts WHERE conversation_id = ? ORDER BY recipient_kind ASC`,
       ).all(conversation.conversation_id) as BrokerInspectionReceipt[];
 
@@ -502,8 +535,8 @@ export class BrokerStore {
         conversation_id, workspace_root, slot, status, last_message_seq, created_at, updated_at
       ) VALUES (?, ?, ?, ?, 0, ?, ?)`,
     ).run(conversationId, workspaceRoot, slot, status, createdAt, createdAt);
-    this.ensureReceipt(conversationId, 'claude', 0);
-    this.ensureReceipt(conversationId, 'codex', 0);
+    this.ensureReceipt(conversationId, 'claude', 0, 0);
+    this.ensureReceipt(conversationId, 'codex', 0, 0);
     return this.requireConversation(conversationId);
   }
 
@@ -536,7 +569,7 @@ export class BrokerStore {
     ).get(peerId) as PeerRow | null;
   }
 
-  private ensureReceipt(conversationId: string, recipientKind: AgentKind, lastAckSeq: number): ReceiptRow {
+  private ensureReceipt(conversationId: string, recipientKind: AgentKind, lastAckSeq: number, lastAutoReplySeq: number): ReceiptRow {
     const existing = this.db.query(
       `SELECT * FROM receipts WHERE conversation_id = ? AND recipient_kind = ?`,
     ).get(conversationId, recipientKind) as ReceiptRow | null;
@@ -544,11 +577,24 @@ export class BrokerStore {
 
     const updatedAt = nowIso();
     this.db.query(
-      `INSERT INTO receipts (conversation_id, recipient_kind, last_ack_seq, updated_at)
-       VALUES (?, ?, ?, ?)`,
-    ).run(conversationId, recipientKind, lastAckSeq, updatedAt);
+      `INSERT INTO receipts (conversation_id, recipient_kind, last_ack_seq, last_auto_reply_seq, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(conversationId, recipientKind, lastAckSeq, lastAutoReplySeq, updatedAt);
 
-    return { conversation_id: conversationId, recipient_kind: recipientKind, last_ack_seq: lastAckSeq, updated_at: updatedAt };
+    return {
+      conversation_id: conversationId,
+      recipient_kind: recipientKind,
+      last_ack_seq: lastAckSeq,
+      last_auto_reply_seq: lastAutoReplySeq,
+      updated_at: updatedAt,
+    };
+  }
+
+  private ensureMigrations(): void {
+    const receiptColumns = this.db.query(`PRAGMA table_info(receipts)`).all() as Array<{ name: string }>;
+    if (!receiptColumns.some((column) => column.name === 'last_auto_reply_seq')) {
+      this.db.exec(`ALTER TABLE receipts ADD COLUMN last_auto_reply_seq INTEGER NOT NULL DEFAULT 0`);
+    }
   }
 
   private attachmentsForMessages<T extends MessageRow>(rows: T[]): Array<T & { attachments?: MessageAttachment[] }> {

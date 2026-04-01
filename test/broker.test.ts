@@ -119,6 +119,26 @@ describe('BrokerStore', () => {
     expect(pollResult.messages).toHaveLength(0);
   });
 
+  it('tracks auto-reply checkpoints separately from ack state', () => {
+    const session = store.registerPeer({
+      agent_kind: 'codex',
+      workspace_root: '/test/workspace',
+      slot: 'default',
+      cwd: '/test/workspace',
+      pid: process.pid,
+      wake_method: 'none',
+      capabilities: {},
+    });
+
+    const initialReceipt = store.getReceiptState(session.conversation_id, 'codex');
+    expect(initialReceipt.last_ack_seq).toBe(0);
+    expect(initialReceipt.last_auto_reply_seq).toBe(0);
+
+    const updatedReceipt = store.markAutoReplyHandled(session.conversation_id, 'codex', 3);
+    expect(updatedReceipt.last_ack_seq).toBe(0);
+    expect(updatedReceipt.last_auto_reply_seq).toBe(3);
+  });
+
   it('getHistory returns messages in chronological order', () => {
     const session = store.registerPeer({
       agent_kind: 'claude',
@@ -238,5 +258,49 @@ describe('BrokerStore', () => {
     expect(pollResult.messages[0].attachments).toHaveLength(1);
     expect(pollResult.messages[0].attachments![0].path).toBe('test/file.md');
     expect(pollResult.messages[0].attachments![0].required).toBe(true);
+  });
+
+  it('updates the sender auto-reply checkpoint when enqueueing an automated reply', () => {
+    const claudeSession = store.registerPeer({
+      agent_kind: 'claude',
+      workspace_root: '/test/workspace',
+      slot: 'default',
+      cwd: '/test/workspace',
+      pid: process.pid,
+      wake_method: 'none',
+      capabilities: {},
+    });
+    const codexSession = store.registerPeer({
+      agent_kind: 'codex',
+      workspace_root: '/test/workspace',
+      slot: 'default',
+      cwd: '/test/workspace',
+      pid: process.pid,
+      wake_method: 'none',
+      capabilities: {},
+    });
+
+    store.enqueueMessage({
+      conversation_id: claudeSession.conversation_id,
+      message_id: 'msg_from_claude',
+      sender_peer_id: claudeSession.peer_id,
+      sender_kind: 'claude',
+      recipient_kind: 'codex',
+      content: 'Inbound for Codex',
+    });
+
+    store.enqueueMessage({
+      conversation_id: codexSession.conversation_id,
+      message_id: 'msg_auto_reply',
+      sender_peer_id: codexSession.peer_id,
+      sender_kind: 'codex',
+      recipient_kind: 'claude',
+      content: 'Automated reply from Codex',
+      automation_handled_seq: 1,
+    });
+
+    const codexReceipt = store.getReceiptState(codexSession.conversation_id, 'codex');
+    expect(codexReceipt.last_auto_reply_seq).toBe(1);
+    expect(codexReceipt.last_ack_seq).toBe(0);
   });
 });
