@@ -1,6 +1,9 @@
 import { resolve } from 'path';
+import { WORKSPACE_ROOT, resolveWorkspacePath } from './workspace.js';
 
-export const BRIDGE_DIR = resolve(process.cwd(), '.bridge');
+export { WORKSPACE_ROOT } from './workspace.js';
+
+export const BRIDGE_DIR = resolveWorkspacePath('.bridge');
 export const RUNTIME_DIR = resolve(BRIDGE_DIR, 'runtime');
 export const PAYLOADS_DIR = resolve(BRIDGE_DIR, 'payloads');
 export const BROKER_DB_FILE = resolve(BRIDGE_DIR, 'broker.db');

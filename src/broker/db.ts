@@ -205,7 +205,7 @@ export class BrokerStore {
 
   pollInbox(conversationId: string, recipientKind: AgentKind, limit: number): BrokerPollResponse {
     this.requireConversation(conversationId);
-    const receipt = this.ensureReceipt(conversationId, recipientKind, 0);
+    const receipt = this.ensureReceipt(conversationId, recipientKind, 0, 0);
     const rows = this.db.query(
       `SELECT *
        FROM messages

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync } from 'fs';
 import { resolve } from 'path';
+import { stopBrokerForWorkspace } from '../src/lib/broker-client.js';
 
 const TEST_WORKSPACE = resolve(import.meta.dir, '.test-workspace-e2e');
 const PACKAGE_ROOT = resolve(import.meta.dir, '..');
@@ -19,12 +20,13 @@ interface McpProcess {
   stdoutReader: Promise<void>;
 }
 
-function spawnMcp(script: string, env: Record<string, string> = {}): McpProcess {
+function spawnMcpAt(script: string, cwd: string, env: Record<string, string> = {}): McpProcess {
   const proc = Bun.spawn(['bun', script], {
-    cwd: TEST_WORKSPACE,
+    cwd,
     env: {
       ...process.env,
       BRIDGE_DISABLE_AUTOREPLY: '1',
+      BRIDGE_WORKSPACE_ROOT: TEST_WORKSPACE,
       BRIDGE_SLOT: 'e2e-test',
       ...env,
     },
@@ -56,6 +58,10 @@ function spawnMcp(script: string, env: Record<string, string> = {}): McpProcess 
   })();
 
   return { proc, pendingResponses, nextId: 1, stdoutReader };
+}
+
+function spawnMcp(script: string, env: Record<string, string> = {}): McpProcess {
+  return spawnMcpAt(script, TEST_WORKSPACE, env);
 }
 
 function writeToStdin(mcp: McpProcess, text: string): void {
@@ -111,7 +117,8 @@ beforeEach(() => {
   mkdirSync(TEST_WORKSPACE, { recursive: true });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await stopBrokerForWorkspace(TEST_WORKSPACE).catch(() => false);
   try { rmSync(TEST_WORKSPACE, { recursive: true, force: true }); } catch {}
 });
 
@@ -215,6 +222,34 @@ describe('E2E: Claude ↔ Codex via broker', () => {
       // Codex's broker client will re-register on next call
       const check = await callTool(codex, 'check_messages') as { has_new: boolean };
       expect(check.has_new).toBe(false);
+    } finally {
+      killMcp(claude);
+      killMcp(codex);
+    }
+  }, 15000);
+
+  it('shares the same bridge state across different subdirectories in one workspace', async () => {
+    const nestedWorkspace = resolve(TEST_WORKSPACE, 'nested');
+    mkdirSync(nestedWorkspace, { recursive: true });
+
+    const claude = spawnMcp(CLAUDE_MCP, { BRIDGE_SLOT: slot('e2e-subdir-shared') });
+    const codex = spawnMcpAt(CODEX_MCP, nestedWorkspace, {
+      BRIDGE_SLOT: slot('e2e-subdir-shared'),
+    });
+
+    try {
+      await initializeMcp(claude);
+      await initializeMcp(codex);
+
+      await callTool(claude, 'send_message', { text: 'Hello across subdirectories' });
+
+      const checkResult = await callTool(codex, 'check_messages') as {
+        has_new: boolean;
+        messages: Array<{ content: string }>;
+      };
+      expect(checkResult.has_new).toBe(true);
+      expect(checkResult.messages).toHaveLength(1);
+      expect(checkResult.messages[0].content).toBe('Hello across subdirectories');
     } finally {
       killMcp(claude);
       killMcp(codex);

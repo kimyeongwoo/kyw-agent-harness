@@ -7,6 +7,7 @@ import {
   BRIDGE_SLOT_ENV,
   DEFAULT_BRIDGE_SLOT,
   MAX_WAIT_TIMEOUT_MS,
+  WORKSPACE_ROOT,
 } from './constants.js';
 import { detectMuxCommand, discoverMuxPaneTarget, validatePaneTarget } from './platform.js';
 import type {
@@ -25,6 +26,7 @@ import type {
 } from './broker-types.js';
 import type { MessageAttachment } from './types.js';
 import { isProcessAlive } from './process-utils.js';
+import { detectGitRoot } from './workspace.js';
 
 const SESSION_LOCK_TIMEOUT_MS = 2000;
 const SESSION_LOCK_RETRY_MS = 10;
@@ -49,22 +51,11 @@ export function getBridgeSlot(): string {
 }
 
 export function getWorkspaceRoot(): string {
-  return resolve(process.cwd());
+  return WORKSPACE_ROOT;
 }
 
 export function getGitRoot(): string | undefined {
-  try {
-    const result = Bun.spawnSync(['git', 'rev-parse', '--show-toplevel'], {
-      cwd: process.cwd(),
-      stdout: 'pipe',
-      stderr: 'ignore',
-    });
-    if (result.exitCode !== 0) return undefined;
-    const text = result.stdout.toString().trim();
-    return text.length > 0 ? resolve(text) : undefined;
-  } catch {
-    return undefined;
-  }
+  return detectGitRoot(process.cwd());
 }
 
 function isLoopbackHttpUrl(value: string): boolean {
@@ -289,7 +280,7 @@ async function spawnBrokerProcess(): Promise<void> {
   const daemonPath = resolveBrokerDaemonPath();
   mkdirSync(RUNTIME_DIR, { recursive: true });
   Bun.spawn([process.execPath, daemonPath], {
-    cwd: process.cwd(),
+    cwd: WORKSPACE_ROOT,
     env: process.env,
     stdin: 'ignore',
     stdout: 'ignore',

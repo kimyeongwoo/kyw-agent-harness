@@ -3,6 +3,7 @@ import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import type { CreateMessageResult, SamplingMessageContentBlock } from '@modelcontextprotocol/sdk/types.js';
 import type { AgentKind, BrokerHistoryMessage, BrokerPollResponse } from '../lib/broker-types.js';
 import type { BrokerClient } from '../lib/broker-client.js';
+import { WORKSPACE_ROOT } from '../lib/constants.js';
 
 const STANDBY_HISTORY_LIMIT = 12;
 const STANDBY_MAX_TOKENS = 2400;
@@ -10,6 +11,7 @@ const STANDBY_WAIT_MS = 20_000;
 const STANDBY_IDLE_DELAY_MS = 250;
 const STANDBY_ERROR_DELAY_MS = 1_000;
 const STANDBY_SAMPLING_TIMEOUT_MS = 600_000;
+const STANDBY_ATTACHMENT_CHAR_BUDGET = 12_000;
 const STANDBY_STOP_TOKEN = '[[STANDBY_STOP]]';
 const STANDBY_REPLY_AND_STOP_TOKEN = '[[STANDBY_REPLY_AND_STOP]]';
 
@@ -83,6 +85,17 @@ interface ReplyDirective {
   stopWithoutReply: boolean;
 }
 
+class StandbyManualReplyRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StandbyManualReplyRequiredError';
+  }
+}
+
+function getCharCount(text: string): number {
+  return Array.from(text).length;
+}
+
 async function readRequiredAttachmentDocuments(pollResult: BrokerPollResponse): Promise<string> {
   const requiredPaths = [...new Set(
     pollResult.messages.flatMap((message) =>
@@ -94,11 +107,22 @@ async function readRequiredAttachmentDocuments(pollResult: BrokerPollResponse): 
 
   if (requiredPaths.length === 0) return '';
 
-  const documents = await Promise.all(requiredPaths.map(async (relativePath) => {
-    const absolutePath = resolve(process.cwd(), relativePath);
-    const text = await Bun.file(absolutePath).text();
-    return `FILE: ${relativePath}\n${text.trim()}`;
-  }));
+  const documents: string[] = [];
+  let totalChars = 0;
+
+  for (const relativePath of requiredPaths) {
+    const absolutePath = resolve(WORKSPACE_ROOT, relativePath);
+    const text = (await Bun.file(absolutePath).text()).trim();
+    totalChars += getCharCount(text);
+
+    if (totalChars > STANDBY_ATTACHMENT_CHAR_BUDGET) {
+      throw new StandbyManualReplyRequiredError(
+        `required attachment documents exceed standby prompt budget (${STANDBY_ATTACHMENT_CHAR_BUDGET} chars); manual reply required`,
+      );
+    }
+
+    documents.push(`FILE: ${relativePath}\n${text}`);
+  }
 
   return documents.join('\n\n');
 }
@@ -272,6 +296,13 @@ export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandl
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         lastError = message;
+
+        if (error instanceof StandbyManualReplyRequiredError) {
+          disabledReason = message;
+          stopped = true;
+          process.stderr.write(`${options.logPrefix} standby disabled: ${message}\n`);
+          return;
+        }
 
         if (/not found|is not recognized|expected output file|No such file or directory/i.test(message)) {
           disabledReason = message;

@@ -14,6 +14,42 @@ function ensureObject(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function normalizeForConfig(value: string): string {
+  return value.replace(/\\/g, '/');
+}
+
+function resolveBunCommand(): string {
+  try {
+    const result = Bun.spawnSync(['bun', '--version'], {
+      stdout: 'ignore',
+      stderr: 'ignore',
+    });
+    if (result.exitCode === 0) {
+      return 'bun';
+    }
+  } catch {}
+
+  return normalizeForConfig(process.execPath);
+}
+
+function resolveBridgeWorkspaceRoot(cwd: string): string {
+  try {
+    const result = Bun.spawnSync(['git', 'rev-parse', '--show-toplevel'], {
+      cwd,
+      stdout: 'pipe',
+      stderr: 'ignore',
+    });
+    if (result.exitCode === 0) {
+      const gitRoot = result.stdout.toString().trim();
+      if (gitRoot) {
+        return resolve(gitRoot);
+      }
+    }
+  } catch {}
+
+  return cwd;
+}
+
 const command = process.argv[2];
 
 switch (command) {
@@ -40,6 +76,8 @@ Run 'kah init' in your project directory first.`);
 async function cmdInit(): Promise<void> {
   const cwd = process.cwd();
   const slotValue = readFlagValue('--slot');
+  const bunCommand = resolveBunCommand();
+  const bridgeWorkspaceRoot = resolveBridgeWorkspaceRoot(cwd);
 
   console.log(`[kah] Initializing kyw_agent_harness in ${cwd}\n`);
   if (slotValue) console.log(`  Slot: ${slotValue}\n`);
@@ -49,7 +87,7 @@ async function cmdInit(): Promise<void> {
   const mcpJsonPath = resolve(cwd, '.mcp.json');
   const claudeServerPath = CLAUDE_SERVER.replace(/\\/g, '/');
   const bridgeServer: Record<string, unknown> = {
-    command: 'bun',
+    command: bunCommand,
     args: [claudeServerPath],
   };
   if (slotValue) {
@@ -82,7 +120,7 @@ async function cmdInit(): Promise<void> {
 
   if (!slotValue) {
     try {
-      const result = Bun.spawnSync(['codex', 'mcp', 'add', 'bridge', '--', 'bun', codexPath]);
+      const result = Bun.spawnSync(['codex', 'mcp', 'add', 'bridge', '--', bunCommand, codexPath]);
       if (result.exitCode === 0) {
         console.log('  Registered via: codex mcp add');
         codexRegistered = true;
@@ -95,7 +133,7 @@ async function cmdInit(): Promise<void> {
     const configToml = resolve(codexConfigDir, 'config.toml');
     const bridgeSection = [
       '[mcp_servers.bridge]',
-      'command = "bun"',
+      `command = "${bunCommand}"`,
       `args = ["${codexPath}"]`,
       ...(slotValue ? [`env = { ${BRIDGE_SLOT_ENV} = "${slotValue}" }`] : []),
     ].join('\n');
@@ -119,7 +157,7 @@ async function cmdInit(): Promise<void> {
 
   // 3. .bridge/ directory
   console.log('[3/3] Bridge state directory');
-  const bridgeDir = resolve(cwd, '.bridge');
+  const bridgeDir = resolve(bridgeWorkspaceRoot, '.bridge');
   mkdirSync(bridgeDir, { recursive: true });
   console.log(`  Created: ${bridgeDir}\n`);
 

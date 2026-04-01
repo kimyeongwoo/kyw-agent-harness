@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'bun:test';
+import { rmSync } from 'fs';
+import { resolve } from 'path';
 import { createStandbyLoop } from '../src/standby/loop.js';
+import { WORKSPACE_ROOT } from '../src/lib/constants.js';
 
 function createPollResult() {
   return {
@@ -183,5 +186,77 @@ describe('createStandbyLoop', () => {
       resetTimeoutOnProgress: true,
     });
     expect(capturedParams.systemPrompt).toContain('peer can wait up to 10 minutes');
+  });
+
+  it('disables auto-reply when required attachments exceed the standby prompt budget', async () => {
+    const acked: number[] = [];
+    const enqueued: Array<{ content: string }> = [];
+    const oversizedPath = 'test-large-attachment.txt';
+    const oversizedAbsolutePath = resolve(WORKSPACE_ROOT, oversizedPath);
+
+    await Bun.write(oversizedAbsolutePath, 'A'.repeat(12_001));
+
+    const loop = createStandbyLoop({
+      agentKind: 'codex',
+      brokerClient: {
+        pollInbox: async () => ({
+          conversation_id: 'conv_test',
+          messages: [{
+            message_id: 'msg_1',
+            seq: 1,
+            sender_kind: 'claude' as const,
+            sender_peer_id: 'peer_1',
+            content: 'Please read the attachment before replying.',
+            attachments: [{
+              kind: 'oversized-message' as const,
+              path: oversizedPath,
+              required: true,
+              char_count: 12_001,
+            }],
+            created_at: new Date().toISOString(),
+          }],
+          max_seq: 1,
+          has_more: false,
+        }),
+        getHistory: async () => ({ messages: [], returned_messages: 0, has_more: false, limit: 12 }),
+        getReceiptState: async () => ({
+          conversation_id: 'conv_test',
+          recipient_kind: 'codex',
+          last_ack_seq: 0,
+          last_auto_reply_seq: 0,
+          updated_at: new Date().toISOString(),
+        }),
+        markAutoReplyHandled: async () => ({
+          conversation_id: 'conv_test',
+          recipient_kind: 'codex',
+          last_ack_seq: 0,
+          last_auto_reply_seq: 0,
+          updated_at: new Date().toISOString(),
+        }),
+        enqueueMessage: async (message: { content: string }) => {
+          enqueued.push(message);
+          return { conversation_id: 'conv_test', message_id: 'reply_1', seq: 2 };
+        },
+        ackInbox: async (seq: number) => {
+          acked.push(seq);
+        },
+      } as any,
+      server: {
+        createMessage: async () => ({ content: { type: 'text', text: 'Should not be called' } }),
+        getClientCapabilities: () => ({ sampling: {} }),
+      } as any,
+      logPrefix: '[test-standby]',
+    });
+
+    try {
+      loop.start();
+      await waitFor(() => loop.getStatus().disabled_reason !== undefined);
+
+      expect(enqueued).toHaveLength(0);
+      expect(acked).toHaveLength(0);
+      expect(loop.getStatus().disabled_reason).toContain('manual reply required');
+    } finally {
+      try { rmSync(oversizedAbsolutePath, { force: true }); } catch {}
+    }
   });
 });

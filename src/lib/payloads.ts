@@ -1,7 +1,7 @@
 import { mkdirSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { relative, resolve } from 'path';
-import { MESSAGE_ATTACHMENT_CHAR_THRESHOLD, PAYLOADS_DIR } from './constants.js';
+import { MESSAGE_ATTACHMENT_CHAR_THRESHOLD, PAYLOADS_DIR, WORKSPACE_ROOT } from './constants.js';
 import type { MessageAttachment } from './types.js';
 
 export interface PreparedMessagePayload {
@@ -40,7 +40,7 @@ export async function prepareMessagePayload(
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const fileName = options?.messageId ? `${options.messageId}.md` : `${timestamp}-${sender}-${randomUUID()}.md`;
   const absolutePath = resolve(sessionDir, fileName);
-  const relativePath = relative(process.cwd(), absolutePath).replace(/\\/g, '/');
+  const relativePath = relative(WORKSPACE_ROOT, absolutePath).replace(/\\/g, '/');
 
   await Bun.write(absolutePath, text);
 

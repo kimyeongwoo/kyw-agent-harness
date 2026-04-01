@@ -174,7 +174,7 @@ export async function startBrokerServer(): Promise<void> {
             : 0;
 
           if (waitMs > 0 && result.messages.length === 0) {
-            server.timeout(request, 0);
+            server.timeout(request, Math.ceil(waitMs / 1000) + 5);
             await registerWaiter(body.conversation_id, body.recipient_kind, waitMs, request.signal);
             const freshResult = store.pollInbox(body.conversation_id, body.recipient_kind, body.limit);
             return jsonResponse(freshResult);
