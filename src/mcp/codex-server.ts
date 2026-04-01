@@ -47,7 +47,7 @@ const server = new Server(
   {
     capabilities: { tools: {}, logging: {} },
     instructions:
-      'To read new messages from Claude, call check_messages. When idle, prefer wait_for_messages so you can block until a new message arrives instead of polling. If a received message includes attachments with required=true, you must read those attachment documents before replying. To send a message back, call send_message.',
+      'To read new messages from Claude, call check_messages. When idle, prefer wait_for_messages so you can block until a new message arrives instead of polling. After each inbound message, assess it objectively, read any attachments with required=true before replying, and take the time needed to reason carefully before responding; the peer can wait up to 10 minutes. Send your response with send_message only when a response is warranted, and then call wait_for_messages again automatically. Continue that loop until the conversation has clearly concluded or the user explicitly wants it to stop. If you need to reset the conversation, call reset_session with confirm=true.',
   },
 );
 const brokerClient = new BrokerClient('codex');
@@ -228,6 +228,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     errorCount = 0;
     lastError = undefined;
     lastMessageAt = undefined;
+    standbyLoop?.start();
     return { content: [{ type: 'text', text: 'Session reset complete.' }] };
   }
 
