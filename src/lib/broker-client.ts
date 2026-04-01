@@ -6,6 +6,7 @@ import {
   RUNTIME_DIR,
   BRIDGE_SLOT_ENV,
   DEFAULT_BRIDGE_SLOT,
+  MAX_WAIT_TIMEOUT_MS,
 } from './constants.js';
 import { detectMuxCommand, discoverMuxPaneTarget, validatePaneTarget } from './platform.js';
 import type {
@@ -434,7 +435,9 @@ export class BrokerClient {
   }
 
   async pollInbox(limit: number, waitMs?: number): Promise<BrokerPollResponse> {
-    const clampedWaitMs = typeof waitMs === 'number' ? Math.min(Math.max(waitMs, 0), 30000) : undefined;
+    const clampedWaitMs = typeof waitMs === 'number'
+      ? Math.min(Math.max(waitMs, 0), MAX_WAIT_TIMEOUT_MS)
+      : undefined;
     const session = await this.ensureRegistered();
     return await brokerRequest<BrokerPollResponse>('/poll-inbox', {
       method: 'POST',

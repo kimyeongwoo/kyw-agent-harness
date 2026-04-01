@@ -1,4 +1,12 @@
-import { BROKER_WAKE_DEBOUNCE_MS, DEFAULT_HISTORY_LIMIT, DEFAULT_MESSAGE_BATCH_SIZE, MAX_HISTORY_LIMIT, MAX_MESSAGE_BATCH_SIZE } from './constants.js';
+import {
+  BROKER_WAKE_DEBOUNCE_MS,
+  DEFAULT_HISTORY_LIMIT,
+  DEFAULT_MESSAGE_BATCH_SIZE,
+  DEFAULT_WAIT_TIMEOUT_MS,
+  MAX_HISTORY_LIMIT,
+  MAX_MESSAGE_BATCH_SIZE,
+  MAX_WAIT_TIMEOUT_MS,
+} from './constants.js';
 import type { AgentKind, WakeMethod } from './broker-types.js';
 import type { BridgeMessage } from './types.js';
 import { muxSendKeys } from './platform.js';
@@ -17,7 +25,11 @@ export function normalizeHistoryLimit(value: unknown): number {
   return Math.min(MAX_HISTORY_LIMIT, Math.floor(parsed));
 }
 
-export function normalizeWaitMs(value: unknown, defaultMs = 30_000, maxMs = 30_000): number {
+export function normalizeWaitMs(
+  value: unknown,
+  defaultMs = DEFAULT_WAIT_TIMEOUT_MS,
+  maxMs = MAX_WAIT_TIMEOUT_MS,
+): number {
   const parsed = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return defaultMs;
   return Math.min(maxMs, Math.floor(parsed));

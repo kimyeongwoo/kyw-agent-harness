@@ -6,12 +6,16 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { detectPlatform, isMuxAvailable } from '../lib/platform.js';
 import type { HealthStatus } from '../lib/types.js';
 import { prepareMessagePayload } from '../lib/payloads.js';
-import { CLAUDE_MCP_INSTANCE_DIR, MAX_MESSAGE_BATCH_SIZE } from '../lib/constants.js';
+import {
+  CLAUDE_MCP_INSTANCE_DIR,
+  DEFAULT_WAIT_TIMEOUT_MS,
+  MAX_MESSAGE_BATCH_SIZE,
+  MAX_WAIT_TIMEOUT_MS,
+} from '../lib/constants.js';
 import { BrokerClient } from '../lib/broker-client.js';
 import { resolveWakeMethod } from '../lib/broker-client.js';
 import { collectRequiredAttachmentPaths, normalizeBatchSize, normalizeWaitMs, sendWakeup } from '../lib/adapter-utils.js';
 import { createStandbyLoop } from '../standby/loop.js';
-import { createMessageLoop } from '../standby/message-loop.js';
 import {
   registerCurrentInstance,
   listOtherLiveInstancePids,
@@ -45,18 +49,11 @@ const mcp = new Server(
   {
     capabilities: { tools: {}, logging: {} },
     instructions:
-      'To check for new messages from Codex, call the check_messages tool. When idle, prefer wait_for_messages so you can block until a new message arrives instead of polling. For continuous background monitoring until stopped, use start_message_loop and stop_message_loop. start_message_loop emits MCP logging notifications (notifications/message), so if your client does not surface background notifications, use wait_for_messages instead. To send a message to Codex, call the reply tool with your message text. If a received message includes attachments with required=true, you must read those attachment documents before replying. To reset the conversation, call the reset_session tool with confirm=true.',
+      'To check for new messages from Codex, call the check_messages tool. When idle, prefer wait_for_messages so you can block until a new message arrives instead of polling. To send a message to Codex, call send_message with your message text. If a received message includes attachments with required=true, you must read those attachment documents before replying. To reset the conversation, call the reset_session tool with confirm=true.',
   },
 );
 const brokerClient = new BrokerClient('claude');
 brokerClient.startHeartbeatLoop();
-const messageLoop = createMessageLoop({
-  agentKind: 'claude',
-  brokerClient,
-  server: mcp,
-  isSingleInstanceSafe: () => !refreshSingleInstanceWarning(),
-  logPrefix: '[claude-mcp]',
-});
 
 if (!AUTO_REPLY_DISABLED_BY_ENV) {
   standbyLoop = createStandbyLoop({
@@ -74,7 +71,7 @@ mcp.oninitialized = () => {
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
-      name: 'reply',
+      name: 'send_message',
       description: 'Send a message to Codex',
       inputSchema: {
         type: 'object',
@@ -114,26 +111,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           timeout_ms: {
             type: 'integer',
             minimum: 0,
-            maximum: 30000,
-            description: 'Optional wait timeout in milliseconds. Defaults to 30000.',
+            maximum: MAX_WAIT_TIMEOUT_MS,
+            description: `Optional wait timeout in milliseconds. Defaults to ${DEFAULT_WAIT_TIMEOUT_MS}; max ${MAX_WAIT_TIMEOUT_MS}.`,
           },
         },
       },
-    },
-    {
-      name: 'start_message_loop',
-      description: 'Start a background loop that emits MCP logging notifications when new bridge messages arrive until stopped.',
-      inputSchema: { type: 'object', properties: {} },
-    },
-    {
-      name: 'stop_message_loop',
-      description: 'Stop the background message loop.',
-      inputSchema: { type: 'object', properties: {} },
-    },
-    {
-      name: 'message_loop_status',
-      description: 'Return current background message loop status.',
-      inputSchema: { type: 'object', properties: {} },
     },
     {
       name: 'reset_session',
@@ -200,31 +182,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
-  if (request.params.name === 'start_message_loop') {
-    const started = messageLoop.start();
-    return {
-      content: [{ type: 'text', text: JSON.stringify({ ok: true, started, running: messageLoop.getStatus().running }) }],
-    };
-  }
-
-  if (request.params.name === 'stop_message_loop') {
-    const stopped = await messageLoop.stop({ wait: true });
-    return {
-      content: [{ type: 'text', text: JSON.stringify({ ok: true, stopped, running: messageLoop.getStatus().running }) }],
-    };
-  }
-
-  if (request.params.name === 'message_loop_status') {
-    return {
-      content: [{ type: 'text', text: JSON.stringify(messageLoop.getStatus()) }],
-    };
-  }
-
   if (request.params.name === 'health_check') {
     const { peer, broker } = await brokerClient.health();
     const otherInstance = refreshSingleInstanceWarning();
     const standbyStatus = standbyLoop?.getStatus();
-    const messageLoopStatus = messageLoop.getStatus();
     const health: HealthStatus = {
       server: 'claude-mcp',
       pid: process.pid,
@@ -249,11 +210,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       auto_reply_disabled_reason: standbyStatus?.disabled_reason,
       auto_reply_last_reply_at: standbyStatus?.last_reply_at,
       auto_reply_last_error: standbyStatus?.last_error,
-      message_loop_running: messageLoopStatus.running,
-      message_loop_last_error: messageLoopStatus.last_error,
-      message_loop_last_notified_seq: messageLoopStatus.last_notified_seq,
-      message_loop_last_notified_at: messageLoopStatus.last_notified_at,
-      message_loop_notification_count: messageLoopStatus.notification_count,
     };
     return { content: [{ type: 'text', text: JSON.stringify(health, null, 2) }] };
   }
@@ -269,7 +225,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: 'text', text: 'Session reset. Fresh conversation started.' }] };
   }
 
-  if (request.params.name !== 'reply') {
+  if (request.params.name !== 'send_message') {
     throw new Error(`Unknown tool: ${request.params.name}`);
   }
 
@@ -304,7 +260,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
   } catch (error) {
     errorCount++;
     lastError = String(error);
-    process.stderr.write(`[claude-mcp] reply error: ${error}\n`);
+    process.stderr.write(`[claude-mcp] send_message error: ${error}\n`);
     return { content: [{ type: 'text', text: JSON.stringify({ sent: false, error: String(error) }) }] };
   }
 });
@@ -318,7 +274,6 @@ process.on('exit', () => {
 
 const shutdown = () => {
   standbyLoop?.stop();
-  void messageLoop.stop();
   brokerClient.stopHeartbeatLoop();
   process.exit(0);
 };

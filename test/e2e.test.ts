@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync, existsSync } from 'fs';
+import { mkdirSync, rmSync } from 'fs';
 import { resolve } from 'path';
 
 const TEST_WORKSPACE = resolve(import.meta.dir, '.test-workspace-e2e');
@@ -15,7 +15,6 @@ function slot(name: string): string {
 interface McpProcess {
   proc: ReturnType<typeof Bun.spawn>;
   pendingResponses: Map<number, (result: unknown) => void>;
-  notifications: Array<{ method?: string; params?: Record<string, unknown> }>;
   nextId: number;
   stdoutReader: Promise<void>;
 }
@@ -35,8 +34,6 @@ function spawnMcp(script: string, env: Record<string, string> = {}): McpProcess 
   });
 
   const pendingResponses = new Map<number, (result: unknown) => void>();
-  const notifications: Array<{ method?: string; params?: Record<string, unknown> }> = [];
-
   // Background stdout reader
   const stdoutReader = (async () => {
     let buffer = '';
@@ -52,15 +49,13 @@ function spawnMcp(script: string, env: Record<string, string> = {}): McpProcess 
           if (typeof parsed.id === 'number' && pendingResponses.has(parsed.id)) {
             pendingResponses.get(parsed.id)!(parsed.result);
             pendingResponses.delete(parsed.id);
-          } else if (typeof parsed.method === 'string') {
-            notifications.push(parsed);
           }
         } catch {}
       }
     }
   })();
 
-  return { proc, pendingResponses, notifications, nextId: 1, stdoutReader };
+  return { proc, pendingResponses, nextId: 1, stdoutReader };
 }
 
 function writeToStdin(mcp: McpProcess, text: string): void {
@@ -130,7 +125,7 @@ describe('E2E: Claude ↔ Codex via broker', () => {
       await initializeMcp(codex);
 
       // Claude sends a message
-      const sendResult = await callTool(claude, 'reply', { text: 'Hello from Claude' }) as { sent: boolean; message_id: string };
+      const sendResult = await callTool(claude, 'send_message', { text: 'Hello from Claude' }) as { sent: boolean; message_id: string };
       expect(sendResult.sent).toBe(true);
       expect(sendResult.message_id).toBeTruthy();
 
@@ -150,11 +145,6 @@ describe('E2E: Claude ↔ Codex via broker', () => {
       expect(claudeCheck.messages).toHaveLength(1);
       expect(claudeCheck.messages[0].content).toBe('Hello from Codex');
 
-      // Verify history on Codex side
-      const history = await callTool(codex, 'get_history', { limit: 10 }) as { messages: Array<{ sender: string; content: string }> };
-      expect(history.messages).toHaveLength(2);
-      expect(history.messages[0].sender).toBe('claude');
-      expect(history.messages[1].sender).toBe('codex');
     } finally {
       killMcp(claude);
       killMcp(codex);
@@ -195,54 +185,12 @@ describe('E2E: Claude ↔ Codex via broker', () => {
       }>;
 
       await Bun.sleep(250);
-      await callTool(claude, 'reply', { text: 'Wake from Claude' });
+      await callTool(claude, 'send_message', { text: 'Wake from Claude' });
 
       const waited = await waitPromise;
       expect(waited.has_new).toBe(true);
       expect(waited.messages).toHaveLength(1);
       expect(waited.messages[0].content).toBe('Wake from Claude');
-    } finally {
-      killMcp(claude);
-      killMcp(codex);
-    }
-  }, 15000);
-
-  it('message loop keeps watching until stopped', async () => {
-    const claude = spawnMcp(CLAUDE_MCP, { BRIDGE_SLOT: slot('e2e-message-loop') });
-    const codex = spawnMcp(CODEX_MCP, { BRIDGE_SLOT: slot('e2e-message-loop') });
-
-    try {
-      await initializeMcp(claude);
-      await initializeMcp(codex);
-
-      const started = await callTool(codex, 'start_message_loop') as { ok: boolean; started: boolean; running: boolean };
-      expect(started.ok).toBe(true);
-      expect(started.started).toBe(true);
-      expect(started.running).toBe(true);
-
-      await callTool(claude, 'reply', { text: 'Loop ping' });
-
-      let status = await callTool(codex, 'message_loop_status') as {
-        running: boolean;
-        notification_count: number;
-        last_notified_seq?: number;
-      };
-      let sawLoggingNotification = codex.notifications.some((notification) => notification.method === 'notifications/message');
-      for (let i = 0; i < 20 && (status.notification_count === 0 || !sawLoggingNotification); i++) {
-        await Bun.sleep(150);
-        status = await callTool(codex, 'message_loop_status') as typeof status;
-        sawLoggingNotification = codex.notifications.some((notification) => notification.method === 'notifications/message');
-      }
-
-      expect(status.running).toBe(true);
-      expect(status.notification_count).toBeGreaterThan(0);
-      expect(status.last_notified_seq).toBe(1);
-      expect(sawLoggingNotification).toBe(true);
-
-      const stopped = await callTool(codex, 'stop_message_loop') as { ok: boolean; stopped: boolean; running: boolean };
-      expect(stopped.ok).toBe(true);
-      expect(stopped.stopped).toBe(true);
-      expect(stopped.running).toBe(false);
     } finally {
       killMcp(claude);
       killMcp(codex);
@@ -257,7 +205,7 @@ describe('E2E: Claude ↔ Codex via broker', () => {
       await initializeMcp(claude);
       await initializeMcp(codex);
 
-      await callTool(claude, 'reply', { text: 'Before reset' });
+      await callTool(claude, 'send_message', { text: 'Before reset' });
       await callTool(codex, 'check_messages');
 
       const resetResult = await callTool(claude, 'reset_session', { confirm: true });

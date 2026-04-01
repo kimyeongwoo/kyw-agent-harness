@@ -41,9 +41,4 @@ export interface HealthStatus {
   auto_reply_disabled_reason?: string;
   auto_reply_last_reply_at?: string;
   auto_reply_last_error?: string;
-  message_loop_running?: boolean;
-  message_loop_last_error?: string;
-  message_loop_last_notified_seq?: number;
-  message_loop_last_notified_at?: string;
-  message_loop_notification_count?: number;
 }

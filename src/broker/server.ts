@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { dirname } from 'path';
-import { BROKER_LOG_FILE, BROKER_RUNTIME_FILE, PAYLOADS_DIR, RUNTIME_DIR } from '../lib/constants.js';
+import { BROKER_LOG_FILE, BROKER_RUNTIME_FILE, MAX_WAIT_TIMEOUT_MS, PAYLOADS_DIR, RUNTIME_DIR } from '../lib/constants.js';
 import type { AgentKind, BrokerHealthResponse, BrokerRuntimeManifest } from '../lib/broker-types.js';
 import type { MessageAttachment } from '../lib/types.js';
 import { createBrokerStore } from './db.js';
@@ -169,7 +169,9 @@ export async function startBrokerServer(): Promise<void> {
           }>(request);
 
           const result = store.pollInbox(body.conversation_id, body.recipient_kind, body.limit);
-          const waitMs = typeof body.wait_ms === 'number' ? Math.min(Math.max(body.wait_ms, 0), 30000) : 0;
+          const waitMs = typeof body.wait_ms === 'number'
+            ? Math.min(Math.max(body.wait_ms, 0), MAX_WAIT_TIMEOUT_MS)
+            : 0;
 
           if (waitMs > 0 && result.messages.length === 0) {
             server.timeout(request, 0);
