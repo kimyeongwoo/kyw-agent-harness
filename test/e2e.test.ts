@@ -15,6 +15,7 @@ function slot(name: string): string {
 interface McpProcess {
   proc: ReturnType<typeof Bun.spawn>;
   pendingResponses: Map<number, (result: unknown) => void>;
+  notifications: Array<{ method?: string; params?: Record<string, unknown> }>;
   nextId: number;
   stdoutReader: Promise<void>;
 }
@@ -34,6 +35,7 @@ function spawnMcp(script: string, env: Record<string, string> = {}): McpProcess 
   });
 
   const pendingResponses = new Map<number, (result: unknown) => void>();
+  const notifications: Array<{ method?: string; params?: Record<string, unknown> }> = [];
 
   // Background stdout reader
   const stdoutReader = (async () => {
@@ -50,13 +52,15 @@ function spawnMcp(script: string, env: Record<string, string> = {}): McpProcess 
           if (typeof parsed.id === 'number' && pendingResponses.has(parsed.id)) {
             pendingResponses.get(parsed.id)!(parsed.result);
             pendingResponses.delete(parsed.id);
+          } else if (typeof parsed.method === 'string') {
+            notifications.push(parsed);
           }
         } catch {}
       }
     }
   })();
 
-  return { proc, pendingResponses, nextId: 1, stdoutReader };
+  return { proc, pendingResponses, notifications, nextId: 1, stdoutReader };
 }
 
 function writeToStdin(mcp: McpProcess, text: string): void {
@@ -223,18 +227,22 @@ describe('E2E: Claude ↔ Codex via broker', () => {
         notification_count: number;
         last_notified_seq?: number;
       };
-      for (let i = 0; i < 20 && status.notification_count === 0; i++) {
+      let sawLoggingNotification = codex.notifications.some((notification) => notification.method === 'notifications/message');
+      for (let i = 0; i < 20 && (status.notification_count === 0 || !sawLoggingNotification); i++) {
         await Bun.sleep(150);
         status = await callTool(codex, 'message_loop_status') as typeof status;
+        sawLoggingNotification = codex.notifications.some((notification) => notification.method === 'notifications/message');
       }
 
       expect(status.running).toBe(true);
       expect(status.notification_count).toBeGreaterThan(0);
       expect(status.last_notified_seq).toBe(1);
+      expect(sawLoggingNotification).toBe(true);
 
-      const stopped = await callTool(codex, 'stop_message_loop') as { ok: boolean; stopped: boolean };
+      const stopped = await callTool(codex, 'stop_message_loop') as { ok: boolean; stopped: boolean; running: boolean };
       expect(stopped.ok).toBe(true);
       expect(stopped.stopped).toBe(true);
+      expect(stopped.running).toBe(false);
     } finally {
       killMcp(claude);
       killMcp(codex);

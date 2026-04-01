@@ -45,7 +45,7 @@ const mcp = new Server(
   {
     capabilities: { tools: {}, logging: {} },
     instructions:
-      'To check for new messages from Codex, call the check_messages tool. When idle, prefer wait_for_messages so you can block until a new message arrives instead of polling. For continuous background monitoring until stopped, use start_message_loop and stop_message_loop. To send a message to Codex, call the reply tool with your message text. If a received message includes attachments with required=true, you must read those attachment documents before replying. To reset the conversation, call the reset_session tool with confirm=true.',
+      'To check for new messages from Codex, call the check_messages tool. When idle, prefer wait_for_messages so you can block until a new message arrives instead of polling. For continuous background monitoring until stopped, use start_message_loop and stop_message_loop. start_message_loop emits MCP logging notifications (notifications/message), so if your client does not surface background notifications, use wait_for_messages instead. To send a message to Codex, call the reply tool with your message text. If a received message includes attachments with required=true, you must read those attachment documents before replying. To reset the conversation, call the reset_session tool with confirm=true.',
   },
 );
 const brokerClient = new BrokerClient('claude');
@@ -122,7 +122,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'start_message_loop',
-      description: 'Start a background loop that continuously watches for new bridge messages until stopped.',
+      description: 'Start a background loop that emits MCP logging notifications when new bridge messages arrive until stopped.',
       inputSchema: { type: 'object', properties: {} },
     },
     {
@@ -208,7 +208,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   if (request.params.name === 'stop_message_loop') {
-    const stopped = messageLoop.stop();
+    const stopped = await messageLoop.stop({ wait: true });
     return {
       content: [{ type: 'text', text: JSON.stringify({ ok: true, stopped, running: messageLoop.getStatus().running }) }],
     };
@@ -318,7 +318,7 @@ process.on('exit', () => {
 
 const shutdown = () => {
   standbyLoop?.stop();
-  messageLoop.stop();
+  void messageLoop.stop();
   brokerClient.stopHeartbeatLoop();
   process.exit(0);
 };

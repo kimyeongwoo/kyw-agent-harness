@@ -6,6 +6,7 @@ const MESSAGE_LOOP_WAIT_MS = 1_000;
 const MESSAGE_LOOP_IDLE_DELAY_MS = 250;
 const MESSAGE_LOOP_DUPLICATE_DELAY_MS = 1_000;
 const MESSAGE_LOOP_ERROR_DELAY_MS = 1_000;
+const MESSAGE_LOOP_STOP_TIMEOUT_MS = 2_500;
 
 export interface MessageLoopStatus {
   running: boolean;
@@ -23,9 +24,14 @@ interface MessageLoopOptions {
   logPrefix: string;
 }
 
+interface MessageLoopStopOptions {
+  wait?: boolean;
+  timeoutMs?: number;
+}
+
 interface MessageLoopHandle {
   start(): boolean;
-  stop(): boolean;
+  stop(options?: MessageLoopStopOptions): Promise<boolean>;
   getStatus(): MessageLoopStatus;
 }
 
@@ -47,6 +53,7 @@ export function createMessageLoop(options: MessageLoopOptions): MessageLoopHandl
   let lastNotifiedAt: string | undefined = undefined;
   let notificationCount = 0;
   let lastConversationId: string | undefined = undefined;
+  let runPromise: Promise<void> | null = null;
 
   async function notify(pollResult: BrokerPollResponse): Promise<void> {
     const text = buildNotificationText(options.agentKind, pollResult);
@@ -101,14 +108,21 @@ export function createMessageLoop(options: MessageLoopOptions): MessageLoopHandl
       if (running) return false;
       stopRequested = false;
       running = true;
-      void run().finally(() => {
+      runPromise = run().finally(() => {
         running = false;
+        runPromise = null;
       });
       return true;
     },
-    stop(): boolean {
+    async stop(stopOptions?: MessageLoopStopOptions): Promise<boolean> {
       if (!running) return false;
       stopRequested = true;
+      if (stopOptions?.wait && runPromise) {
+        await Promise.race([
+          runPromise.catch(() => undefined),
+          Bun.sleep(stopOptions.timeoutMs ?? MESSAGE_LOOP_STOP_TIMEOUT_MS),
+        ]);
+      }
       return true;
     },
     getStatus(): MessageLoopStatus {
