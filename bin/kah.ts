@@ -3,6 +3,13 @@
 import { resolve, dirname } from 'path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { buildCodexBridgeSection, upsertCodexBridgeConfig } from '../src/lib/codex-config.js';
+import { syncHistory } from '../src/prompts/sync.js';
+import { exportPrompts } from '../src/prompts/export.js';
+import { listProjects } from '../src/prompts/list.js';
+import {
+  HISTORY_JSONL_PATH,
+  PROMPT_HISTORY_DIR,
+} from '../src/prompts/types.js';
 
 const PACKAGE_ROOT = resolve(dirname(Bun.main), '..');
 const CLAUDE_SERVER = resolve(PACKAGE_ROOT, 'start-claude.ts');
@@ -60,6 +67,9 @@ switch (command) {
   case 'statusline':
     cmdStatusline();
     break;
+  case 'prompts':
+    cmdPrompts();
+    break;
   default:
     printUsage();
 }
@@ -70,8 +80,9 @@ function printUsage(): void {
 Usage:
   kah init [--slot name]    Configure MCP servers for current directory
   kah statusline            Install HUD status line for Claude Code
+  kah prompts <command>     Manage prompt history (sync, export, list)
 
-Run 'kah init' in your project directory first.`);
+Run 'kah prompts' for subcommand help.`);
 }
 
 async function cmdInit(): Promise<void> {
@@ -195,6 +206,80 @@ function cmdStatusline(): void {
   console.log(`[kah] StatusLine HUD installed.`);
   console.log(`  Script: ${hudScript}`);
   console.log('  Restart Claude Code to see the status bar.');
+}
+
+function resolvePromptPaths(): {
+  historyPath: string;
+  archivePath: string;
+  watermarkPath: string;
+  exportsDir: string;
+} {
+  const dir = process.env.KAH_PROMPT_HISTORY_DIR ?? PROMPT_HISTORY_DIR;
+  return {
+    historyPath: process.env.KAH_HISTORY_JSONL ?? HISTORY_JSONL_PATH,
+    archivePath: resolve(dir, 'archive.jsonl'),
+    watermarkPath: resolve(dir, 'last-sync.json'),
+    exportsDir: resolve(dir, 'exports'),
+  };
+}
+
+function cmdPrompts(): void {
+  const subcommand = process.argv[3];
+  const paths = resolvePromptPaths();
+
+  switch (subcommand) {
+    case 'sync': {
+      const result = syncHistory(paths);
+      if (result.warning) console.warn(`[kah] Warning: ${result.warning}`);
+      console.log(`[kah] Synced ${result.newEntries} new entries. Total archived: ${result.totalArchived}`);
+      break;
+    }
+    case 'export': {
+      const syncResult = syncHistory(paths);
+      if (syncResult.warning) console.warn(`[kah] Warning: ${syncResult.warning}`);
+
+      const exportResult = exportPrompts({
+        archivePath: paths.archivePath,
+        exportsDir: paths.exportsDir,
+        project: readFlagValue('--project'),
+        from: readFlagValue('--from'),
+        to: readFlagValue('--to'),
+        keyword: readFlagValue('--keyword'),
+      });
+
+      console.log(`[kah] Exported ${exportResult.totalPrompts} prompts to ${exportResult.filesWritten} files.`);
+      console.log(`  Location: ${paths.exportsDir}`);
+      break;
+    }
+    case 'list': {
+      const syncResult = syncHistory(paths);
+      if (syncResult.warning) console.warn(`[kah] Warning: ${syncResult.warning}`);
+
+      const projects = listProjects({ archivePath: paths.archivePath });
+      if (projects.length === 0) {
+        console.log('[kah] No prompts found.');
+        return;
+      }
+
+      console.log('[kah] Prompt history by project:\n');
+      for (const p of projects) {
+        console.log(`  ${p.slug.padEnd(30)} ${String(p.count).padStart(5)} prompts  ${String(p.sessions).padStart(3)} sessions  ${p.firstDate} ~ ${p.lastDate}`);
+      }
+      console.log(`\n  Total: ${projects.reduce((sum, p) => sum + p.count, 0)} prompts across ${projects.length} projects`);
+      break;
+    }
+    default:
+      console.log(`Usage:
+  kah prompts sync                           Backup history.jsonl to archive
+  kah prompts export [options]               Export prompts as markdown
+  kah prompts list                           Show project summary
+
+Export options:
+  --project <name>    Filter by project (partial match, case insensitive)
+  --from <YYYY-MM-DD> Start date
+  --to <YYYY-MM-DD>   End date
+  --keyword <text>    Filter by keyword`);
+  }
 }
 
 function readFlagValue(flag: string): string | undefined {
