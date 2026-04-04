@@ -259,4 +259,117 @@ describe('createStandbyLoop', () => {
       try { rmSync(oversizedAbsolutePath, { force: true }); } catch {}
     }
   });
+
+  it('drops a generated reply when the inbox is acknowledged during sampling', async () => {
+    const enqueued: Array<{ content: string }> = [];
+    const receiptState = {
+      conversation_id: 'conv_test',
+      recipient_kind: 'codex' as const,
+      last_ack_seq: 0,
+      last_auto_reply_seq: 0,
+    };
+
+    const loop = createStandbyLoop({
+      agentKind: 'codex',
+      brokerClient: {
+        pollInbox: async () => (
+          receiptState.last_ack_seq >= 1
+            ? { conversation_id: 'conv_test', messages: [], max_seq: 1, has_more: false }
+            : createPollResult()
+        ),
+        getHistory: async () => ({ messages: [], returned_messages: 0, has_more: false, limit: 12 }),
+        getReceiptState: async () => ({
+          ...receiptState,
+          updated_at: new Date().toISOString(),
+        }),
+        markAutoReplyHandled: async () => ({
+          ...receiptState,
+          updated_at: new Date().toISOString(),
+        }),
+        enqueueMessage: async (message: { content: string }) => {
+          enqueued.push(message);
+          return { conversation_id: 'conv_test', message_id: 'reply_1', seq: 2 };
+        },
+        ackInbox: async () => {},
+      } as any,
+      server: {
+        createMessage: async () => {
+          setTimeout(() => {
+            receiptState.last_ack_seq = 1;
+          }, 10);
+          await Bun.sleep(30);
+          return { content: { type: 'text', text: 'This reply should be dropped.' } };
+        },
+        getClientCapabilities: () => ({ sampling: {} }),
+      } as any,
+      logPrefix: '[test-standby]',
+    });
+
+    loop.start();
+    await waitFor(() => loop.getStatus().last_handled_seq === 1);
+    loop.stop();
+
+    expect(enqueued).toHaveLength(0);
+    expect(loop.getStatus().last_reply_at).toBeUndefined();
+    expect(loop.getStatus().last_error).toBeUndefined();
+  });
+
+  it('drops a generated reply when another auto-reply advances the handled checkpoint during sampling', async () => {
+    const acked: number[] = [];
+    const enqueued: Array<{ content: string }> = [];
+    const receiptState = {
+      conversation_id: 'conv_test',
+      recipient_kind: 'codex' as const,
+      last_ack_seq: 0,
+      last_auto_reply_seq: 0,
+    };
+
+    const loop = createStandbyLoop({
+      agentKind: 'codex',
+      brokerClient: {
+        pollInbox: async () => (
+          receiptState.last_ack_seq >= 1
+            ? { conversation_id: 'conv_test', messages: [], max_seq: 1, has_more: false }
+            : createPollResult()
+        ),
+        getHistory: async () => ({ messages: [], returned_messages: 0, has_more: false, limit: 12 }),
+        getReceiptState: async () => ({
+          ...receiptState,
+          updated_at: new Date().toISOString(),
+        }),
+        markAutoReplyHandled: async () => ({
+          ...receiptState,
+          updated_at: new Date().toISOString(),
+        }),
+        enqueueMessage: async (message: { content: string }) => {
+          enqueued.push(message);
+          return { conversation_id: 'conv_test', message_id: 'reply_1', seq: 2 };
+        },
+        ackInbox: async (seq: number) => {
+          acked.push(seq);
+          receiptState.last_ack_seq = seq;
+        },
+      } as any,
+      server: {
+        createMessage: async () => {
+          setTimeout(() => {
+            receiptState.last_auto_reply_seq = 1;
+          }, 10);
+          await Bun.sleep(30);
+          return { content: { type: 'text', text: 'This reply should be dropped.' } };
+        },
+        getClientCapabilities: () => ({ sampling: {} }),
+      } as any,
+      logPrefix: '[test-standby]',
+    });
+
+    loop.start();
+    await waitFor(() => acked.includes(1));
+    loop.stop();
+
+    expect(enqueued).toHaveLength(0);
+    expect(loop.getStatus().last_handled_seq).toBe(1);
+    expect(loop.getStatus().last_reply_at).toBeUndefined();
+    expect(loop.getStatus().last_error).toBeUndefined();
+  });
 });

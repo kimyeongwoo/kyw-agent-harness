@@ -1,7 +1,7 @@
 import { resolve } from 'path';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import type { CreateMessageResult, SamplingMessageContentBlock } from '@modelcontextprotocol/sdk/types.js';
-import type { AgentKind, BrokerHistoryMessage, BrokerPollResponse } from '../lib/broker-types.js';
+import type { AgentKind, BrokerHistoryMessage, BrokerPollResponse, BrokerReceiptState } from '../lib/broker-types.js';
 import type { BrokerClient } from '../lib/broker-client.js';
 import { WORKSPACE_ROOT } from '../lib/constants.js';
 
@@ -196,6 +196,17 @@ function filterUnhandledMessages(pollResult: BrokerPollResponse, handledSeq: num
   };
 }
 
+function getHandledSeq(lastHandledSeq: number, receipt: Pick<BrokerReceiptState, 'last_ack_seq' | 'last_auto_reply_seq'>): number {
+  return Math.max(lastHandledSeq, receipt.last_ack_seq, receipt.last_auto_reply_seq);
+}
+
+function didReceiptAdvanceDuringSampling(
+  before: Pick<BrokerReceiptState, 'last_ack_seq' | 'last_auto_reply_seq'>,
+  after: Pick<BrokerReceiptState, 'last_ack_seq' | 'last_auto_reply_seq'>,
+): boolean {
+  return after.last_ack_seq > before.last_ack_seq || after.last_auto_reply_seq > before.last_auto_reply_seq;
+}
+
 export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandle {
   let stopped = false;
   let running = false;
@@ -249,7 +260,7 @@ export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandl
     }
 
     const receipt = await options.brokerClient.getReceiptState();
-    const handledSeq = Math.max(lastHandledSeq, receipt.last_auto_reply_seq);
+    const handledSeq = getHandledSeq(lastHandledSeq, receipt);
     const pendingPollResult = filterUnhandledMessages(pollResult, handledSeq);
 
     if (pendingPollResult.messages.length === 0) {
@@ -261,7 +272,17 @@ export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandl
 
     const history = await options.brokerClient.getHistory(STANDBY_HISTORY_LIMIT);
     const requiredAttachmentDocs = await readRequiredAttachmentDocuments(pendingPollResult);
-    const replyDirective = parseReplyDirective(await generateReply(pendingPollResult, history.messages, requiredAttachmentDocs));
+    const rawReply = await generateReply(pendingPollResult, history.messages, requiredAttachmentDocs);
+    const latestReceipt = await options.brokerClient.getReceiptState();
+
+    if (didReceiptAdvanceDuringSampling(receipt, latestReceipt)) {
+      lastHandledSeq = getHandledSeq(lastHandledSeq, latestReceipt);
+      lastError = undefined;
+      await Bun.sleep(STANDBY_IDLE_DELAY_MS);
+      return;
+    }
+
+    const replyDirective = parseReplyDirective(rawReply);
 
     if (replyDirective.stopWithoutReply) {
       await options.brokerClient.markAutoReplyHandled(pendingPollResult.max_seq);

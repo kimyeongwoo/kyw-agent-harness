@@ -2,6 +2,7 @@
 
 import { resolve, dirname } from 'path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { buildCodexBridgeSection, upsertCodexBridgeConfig } from '../src/lib/codex-config.js';
 
 const PACKAGE_ROOT = resolve(dirname(Bun.main), '..');
 const CLAUDE_SERVER = resolve(PACKAGE_ROOT, 'start-claude.ts');
@@ -131,20 +132,17 @@ async function cmdInit(): Promise<void> {
   if (!codexRegistered) {
     const codexConfigDir = resolve(process.env.HOME || process.env.USERPROFILE || '~', '.codex');
     const configToml = resolve(codexConfigDir, 'config.toml');
-    const bridgeSection = [
-      '[mcp_servers.bridge]',
-      `command = "${bunCommand}"`,
-      `args = ["${codexPath}"]`,
-      ...(slotValue ? [`env = { ${BRIDGE_SLOT_ENV} = "${slotValue}" }`] : []),
-    ].join('\n');
+    const bridgeSection = buildCodexBridgeSection({ bunCommand, codexPath, slotValue });
 
     if (existsSync(configToml)) {
       const existing = readFileSync(configToml, 'utf-8');
-      if (existing.includes('[mcp_servers.bridge]')) {
-        console.log('  [SKIP] Already registered in config.toml');
+      const updated = upsertCodexBridgeConfig(existing, { bunCommand, codexPath, slotValue });
+
+      if (updated === existing) {
+        console.log('  [SKIP] Bridge config already current');
       } else {
         writeFileSync(`${configToml}.bak`, existing);
-        writeFileSync(configToml, `${existing.trimEnd()}\n\n${bridgeSection}\n`);
+        writeFileSync(configToml, updated);
         console.log(`  Updated: ${configToml} (backup created)`);
       }
     } else {
