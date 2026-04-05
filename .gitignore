@@ -5,3 +5,4 @@ dist/
 *.err
 *.log
 test/.test-workspace-*/
+.mcp.json
