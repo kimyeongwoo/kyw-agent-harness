@@ -50,16 +50,17 @@ describe('extractProjectSlug', () => {
 });
 
 describe('formatDate', () => {
-  it('formats timestamp to YYYY-MM-DD', () => {
-    const ts = new Date('2026-04-04T13:11:00Z').getTime();
-    expect(formatDate(ts)).toBe('2026-04-04');
+  it('formats timestamp to YYYY-MM-DD in local time', () => {
+    // Use a fixed local date to avoid timezone-dependent failures
+    const d = new Date(2026, 3, 4, 13, 11, 0); // April 4, 2026 13:11 local
+    expect(formatDate(d.getTime())).toBe('2026-04-04');
   });
 });
 
 describe('formatTime', () => {
-  it('formats timestamp to HH:mm', () => {
-    const ts = new Date('2026-04-04T05:03:00Z').getTime();
-    expect(formatTime(ts)).toBe('05:03');
+  it('formats timestamp to HH:mm in local time', () => {
+    const d = new Date(2026, 3, 4, 5, 3, 0); // April 4, 2026 05:03 local
+    expect(formatTime(d.getTime())).toBe('05:03');
   });
 });
 

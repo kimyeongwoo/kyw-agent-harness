@@ -31,9 +31,9 @@ describe('exportPrompts', () => {
 
   it('exports all entries grouped by project and date', () => {
     const { archivePath, exportsDir } = setup([
-      makeEntry('hello', new Date('2026-04-04T13:00:00Z').getTime(), 'C:\\proj\\A', 's1'),
-      makeEntry('world', new Date('2026-04-04T14:00:00Z').getTime(), 'C:\\proj\\A', 's1'),
-      makeEntry('other', new Date('2026-04-04T10:00:00Z').getTime(), 'C:\\proj\\B', 's2'),
+      makeEntry('hello', new Date(2026, 3, 4, 13, 0, 0).getTime(), 'C:\\proj\\A', 's1'),
+      makeEntry('world', new Date(2026, 3, 4, 14, 0, 0).getTime(), 'C:\\proj\\A', 's1'),
+      makeEntry('other', new Date(2026, 3, 4, 10, 0, 0).getTime(), 'C:\\proj\\B', 's2'),
     ]);
 
     const result = exportPrompts({ archivePath, exportsDir });
@@ -65,9 +65,9 @@ describe('exportPrompts', () => {
 
   it('filters by date range', () => {
     const { archivePath, exportsDir } = setup([
-      makeEntry('old', new Date('2026-03-01T10:00:00Z').getTime(), 'C:\\proj\\A', 's1'),
-      makeEntry('in-range', new Date('2026-04-02T10:00:00Z').getTime(), 'C:\\proj\\A', 's1'),
-      makeEntry('future', new Date('2026-05-01T10:00:00Z').getTime(), 'C:\\proj\\A', 's1'),
+      makeEntry('old', new Date(2026, 2, 1, 10, 0, 0).getTime(), 'C:\\proj\\A', 's1'),
+      makeEntry('in-range', new Date(2026, 3, 2, 10, 0, 0).getTime(), 'C:\\proj\\A', 's1'),
+      makeEntry('future', new Date(2026, 4, 1, 10, 0, 0).getTime(), 'C:\\proj\\A', 's1'),
     ]);
 
     const result = exportPrompts({ archivePath, exportsDir, from: '2026-04-01', to: '2026-04-30' });
@@ -95,7 +95,7 @@ describe('exportPrompts', () => {
 
   it('overwrites existing export files (idempotent)', () => {
     const { archivePath, exportsDir } = setup([
-      makeEntry('first', new Date('2026-04-04T10:00:00Z').getTime(), 'C:\\proj\\A', 's1'),
+      makeEntry('first', new Date(2026, 3, 4, 10, 0, 0).getTime(), 'C:\\proj\\A', 's1'),
     ]);
 
     exportPrompts({ archivePath, exportsDir });
@@ -108,7 +108,7 @@ describe('exportPrompts', () => {
 
   it('formats markdown with session short ID and time', () => {
     const { archivePath, exportsDir } = setup([
-      makeEntry('my prompt', new Date('2026-04-04T13:11:00Z').getTime(), 'C:\\proj\\X', 'abcdef12-3456-7890-abcd-ef1234567890'),
+      makeEntry('my prompt', new Date(2026, 3, 4, 13, 11, 0).getTime(), 'C:\\proj\\X', 'abcdef12-3456-7890-abcd-ef1234567890'),
     ]);
 
     exportPrompts({ archivePath, exportsDir });
