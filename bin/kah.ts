@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { resolve, dirname } from 'path';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'fs';
 import { buildCodexBridgeSection, upsertCodexBridgeConfig } from '../src/lib/codex-config.js';
 import { syncHistory } from '../src/prompts/sync.js';
 import { exportPrompts } from '../src/prompts/export.js';
@@ -70,6 +70,9 @@ switch (command) {
   case 'prompts':
     cmdPrompts();
     break;
+  case 'team':
+    cmdTeam();
+    break;
   default:
     printUsage();
 }
@@ -81,8 +84,9 @@ Usage:
   kah init [--slot name]    Configure MCP servers for current directory
   kah statusline            Install HUD status line for Claude Code
   kah prompts <command>     Manage prompt history (sync, export, list)
+  kah team <command>        Install /team SKILL and agents to ~/.claude
 
-Run 'kah prompts' for subcommand help.`);
+Run 'kah prompts' or 'kah team' for subcommand help.`);
 }
 
 async function cmdInit(): Promise<void> {
@@ -287,4 +291,94 @@ function readFlagValue(flag: string): string | undefined {
   if (index === -1) return undefined;
   const value = process.argv[index + 1];
   return value && !value.startsWith('--') ? value : undefined;
+}
+
+function cmdTeam(): void {
+  const subcommand = process.argv[3];
+  switch (subcommand) {
+    case 'install':
+      cmdTeamInstall();
+      break;
+    default:
+      console.log(`Usage:
+  kah team install    Install /team SKILL and agents to ~/.claude/
+
+Description:
+  Copies skills/team/SKILL.md and agents/*.md from this package to
+  ~/.claude/skills/team/ and ~/.claude/agents/. Idempotent: re-runs
+  skip files that are already up to date and back up files that differ.`);
+  }
+}
+
+function cmdTeamInstall(): void {
+  const sourceSkillFile = resolve(PACKAGE_ROOT, 'skills', 'team', 'SKILL.md');
+  const sourceAgentsDir = resolve(PACKAGE_ROOT, 'agents');
+
+  if (!existsSync(sourceSkillFile)) {
+    console.error(`[kah] Source not found: ${sourceSkillFile}`);
+    process.exit(1);
+  }
+  if (!existsSync(sourceAgentsDir)) {
+    console.error(`[kah] Source not found: ${sourceAgentsDir}`);
+    process.exit(1);
+  }
+
+  const claudeDir = resolve(process.env.HOME || process.env.USERPROFILE || '~', '.claude');
+  const destSkillDir = resolve(claudeDir, 'skills', 'team');
+  const destSkillFile = resolve(destSkillDir, 'SKILL.md');
+  const destAgentsDir = resolve(claudeDir, 'agents');
+
+  console.log(`[kah] Installing /team SKILL and agents to ~/.claude/\n`);
+
+  // [1/2] Skill
+  console.log('[1/2] Skill');
+  mkdirSync(destSkillDir, { recursive: true });
+  if (existsSync(destSkillFile)) {
+    const existing = readFileSync(destSkillFile, 'utf-8');
+    const incoming = readFileSync(sourceSkillFile, 'utf-8');
+    if (existing === incoming) {
+      console.log(`  [SKIP] Already up to date: ${destSkillFile}`);
+    } else {
+      writeFileSync(`${destSkillFile}.bak`, existing);
+      writeFileSync(destSkillFile, incoming);
+      console.log(`  Updated: ${destSkillFile} (backup created)`);
+    }
+  } else {
+    writeFileSync(destSkillFile, readFileSync(sourceSkillFile));
+    console.log(`  Written: ${destSkillFile}`);
+  }
+  console.log('');
+
+  // [2/2] Agents
+  console.log('[2/2] Agents');
+  mkdirSync(destAgentsDir, { recursive: true });
+  let copied = 0;
+  let updated = 0;
+  let skipped = 0;
+  for (const entry of readdirSync(sourceAgentsDir)) {
+    if (!entry.endsWith('.md')) continue;
+    const src = resolve(sourceAgentsDir, entry);
+    const dest = resolve(destAgentsDir, entry);
+    if (existsSync(dest)) {
+      const existing = readFileSync(dest, 'utf-8');
+      const incoming = readFileSync(src, 'utf-8');
+      if (existing === incoming) {
+        skipped++;
+        continue;
+      }
+      writeFileSync(`${dest}.bak`, existing);
+      writeFileSync(dest, incoming);
+      updated++;
+      console.log(`  Updated: ${entry} (backup created)`);
+    } else {
+      writeFileSync(dest, readFileSync(src));
+      copied++;
+      console.log(`  Written: ${entry}`);
+    }
+  }
+  console.log(`  Summary: ${copied} new, ${updated} updated, ${skipped} unchanged`);
+  console.log('');
+
+  console.log('[kah] Installation complete.');
+  console.log('  Restart Claude Code (or reload skills) to use the /team SKILL.');
 }

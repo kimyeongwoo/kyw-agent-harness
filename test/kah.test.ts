@@ -81,3 +81,65 @@ describe('kah init', () => {
     expect(mcpJson.mcpServers.bridge.env?.BRIDGE_SLOT).toBe('demo');
   });
 });
+
+describe('kah team install', () => {
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop();
+      if (dir) {
+        try { rmSync(dir, { recursive: true, force: true }); } catch {}
+      }
+    }
+  });
+
+  it('copies SKILL.md and agents to ~/.claude and is idempotent', () => {
+    const homeDir = createTempDir('kah-team-test-');
+    tempDirs.push(homeDir);
+
+    const env = {
+      ...process.env,
+      HOME: homeDir,
+      USERPROFILE: homeDir,
+    };
+
+    // First run: should copy files
+    const first = Bun.spawnSync([process.execPath, KAH_SCRIPT, 'team', 'install'], {
+      env,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+
+    expect(first.exitCode).toBe(0);
+
+    const destSkillFile = resolve(homeDir, '.claude', 'skills', 'team', 'SKILL.md');
+    const destExecutorFile = resolve(homeDir, '.claude', 'agents', 'executor.md');
+    const destVerifierFile = resolve(homeDir, '.claude', 'agents', 'verifier.md');
+
+    expect(existsSync(destSkillFile)).toBe(true);
+    expect(existsSync(destExecutorFile)).toBe(true);
+    expect(existsSync(destVerifierFile)).toBe(true);
+
+    // Verify content matches source (sanity check that the copy works correctly)
+    const sourceSkill = readText(resolve(PACKAGE_ROOT, 'skills', 'team', 'SKILL.md'));
+    expect(readText(destSkillFile)).toBe(sourceSkill);
+
+    // Verify SKILL.md does NOT contain OMC keywords (regression guard)
+    expect(readText(destSkillFile)).not.toContain('oh-my-claudecode');
+    expect(readText(destSkillFile)).not.toContain('.omc/');
+    expect(readText(destSkillFile)).not.toContain('state_write');
+
+    // Second run: should be idempotent (no .bak files created)
+    const second = Bun.spawnSync([process.execPath, KAH_SCRIPT, 'team', 'install'], {
+      env,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+
+    expect(second.exitCode).toBe(0);
+    const stdout = second.stdout.toString();
+    expect(stdout).toContain('[SKIP] Already up to date');
+    expect(existsSync(`${destSkillFile}.bak`)).toBe(false);
+  });
+});

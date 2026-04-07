@@ -16,6 +16,8 @@
     "bin/",
     "src/",
     "scripts/",
+    "skills/",
+    "agents/",
     "start-claude.ts",
     "start-codex.ts"
   ],
