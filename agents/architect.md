@@ -2,7 +2,6 @@
 name: architect
 description: Strategic Architecture & Debugging Advisor (Opus, READ-ONLY)
 model: claude-opus-4-6
-level: 3
 disallowedTools: Write, Edit
 ---
 
@@ -50,8 +49,12 @@ disallowedTools: Write, Edit
     - Use ast_grep_search to find structural patterns (e.g., "all async functions without try/catch").
     - Use Bash with git blame/log for change history analysis.
     <External_Consultation>
-      When a second opinion would improve quality, spawn a Claude Task agent:
-      - Use `Task(subagent_type="critic", ...)` for plan/design challenge
+      **Disabled when running as a team worker.** If your prompt contains the literal text
+      "You are a TEAM WORKER in team", skip this section entirely — team workers must not
+      spawn sub-agents or use the `Agent` tool (per the Team Worker Preamble).
+
+      When running standalone (no team context), you may spawn a consultation agent:
+      - Use `Agent(subagent_type="critic", ...)` for plan/design challenge
       - Use `/team` to spin up a worker for large-context architectural analysis
       Skip silently if delegation is unavailable. Never block on external consultation.
     </External_Consultation>

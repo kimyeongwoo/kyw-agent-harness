@@ -125,10 +125,36 @@ describe('kah team install', () => {
     const sourceSkill = readText(resolve(PACKAGE_ROOT, 'skills', 'team', 'SKILL.md'));
     expect(readText(destSkillFile)).toBe(sourceSkill);
 
-    // Verify SKILL.md does NOT contain OMC keywords (regression guard)
-    expect(readText(destSkillFile)).not.toContain('oh-my-claudecode');
-    expect(readText(destSkillFile)).not.toContain('.omc/');
-    expect(readText(destSkillFile)).not.toContain('state_write');
+    // Regression guard: ensure no OMC-specific artifacts leaked in
+    const omcKeywords = [
+      'oh-my-claudecode',
+      '.omc/',
+      'state_write',
+      'linked_ralph',
+      'RALPLAN',
+      'cleanup-orphans',
+      'omc team',
+      'codex_worker',
+      'gemini_worker',
+    ];
+    for (const kw of omcKeywords) {
+      expect(readText(destSkillFile)).not.toContain(kw);
+      expect(readText(destExecutorFile)).not.toContain(kw);
+      expect(readText(destVerifierFile)).not.toContain(kw);
+    }
+
+    // Regression guard: SendMessage must use {to, message} — not legacy {type, recipient, content}
+    const skillText = readText(destSkillFile);
+    // The only permitted "type": "message" is the negative-instruction excerpt in the
+    // Worker Preamble (step 4), which explicitly tells workers NOT to use that format.
+    const typeMessageMatches = skillText.match(/"type":\s*"message"/g) || [];
+    expect(typeMessageMatches.length).toBeLessThanOrEqual(1);
+    expect(skillText).not.toMatch(/"type":\s*"broadcast"/);
+    expect(skillText).not.toContain('"recipient":');
+    // Positive patterns should exist
+    expect(skillText).toContain('"to":');
+    expect(skillText).toContain('"message":');
+    expect(skillText).toContain('Agent(');
 
     // Second run: should be idempotent (no .bak files created)
     const second = Bun.spawnSync([process.execPath, KAH_SCRIPT, 'team', 'install'], {

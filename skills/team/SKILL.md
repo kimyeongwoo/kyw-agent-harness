@@ -3,12 +3,15 @@ name: team
 description: N coordinated agents on shared task list using Claude Code native teams
 argument-hint: "[N:agent-type] <task description>"
 aliases: []
-level: 4
 ---
+
+<!-- team skill: kyw_agent_harness v2.5.1-fix1 (aligned with Claude Code 2.1 schema) -->
 
 # Team Skill
 
-Spawn N coordinated agents working on a shared task list using Claude Code's native team tools (`TeamCreate`, `Task` with `team_name`, `SendMessage`, `TeamDelete`). Provides built-in team management, inter-agent messaging, and task dependencies — no external dependencies required.
+Spawn N coordinated agents working on a shared task list using Claude Code's native team tools (`TeamCreate`, `Agent` with `team_name`, `SendMessage`, `TeamDelete`). Provides built-in team management, inter-agent messaging, and task dependencies — no external dependencies required.
+
+> Requires Claude Code **v2.1.32 or later** with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. The spawn tool is named `Agent` in Claude Code 2.1+ (formerly `Task`).
 
 ## Usage
 
@@ -51,7 +54,7 @@ User: "/team 3:executor fix all TypeScript errors"
               +-- TaskUpdate x N (pre-assign owners)
               |       -> task #1 owner=worker-1, etc.
               |
-              +-- Task(team_name="fix-ts-errors", name="worker-1") x 3
+              +-- Agent(team_name="fix-ts-errors", name="worker-1") x 3
               |       -> spawns teammates into the team
               |
               +-- Monitor loop
@@ -90,11 +93,13 @@ Each pipeline stage uses **specialized agents** — not just executors. The lead
 
 | Stage | Required Agents | Optional Agents | Selection Criteria |
 |-------|----------------|-----------------|-------------------|
-| **team-plan** | `explore` (haiku), `planner` (opus) | `analyst` (opus), `architect` (opus) | Use `analyst` for unclear requirements. Use `architect` for systems with complex boundaries. |
-| **team-prd** | `analyst` (opus) | `critic` (opus) | Use `critic` to challenge scope. |
-| **team-exec** | `executor` (sonnet) | `executor` (opus), `debugger` (sonnet) | Match agent to subtask type. Use `executor` (opus) for complex autonomous work, `debugger` for compilation issues. |
-| **team-verify** | `verifier` (sonnet) | `critic` (opus) | Always run `verifier`. Add `critic` for >20 files or architectural changes. |
-| **team-fix** | `executor` (sonnet) | `debugger` (sonnet), `executor` (opus) | Use `debugger` for type/build errors and regression isolation. Use `executor` (opus) for complex multi-file fixes. |
+| **team-plan** | `explore`, `planner` | `analyst`, `architect` | Use `analyst` for unclear requirements. Use `architect` for systems with complex boundaries. |
+| **team-prd** | `analyst` | `critic` | Use `critic` to challenge scope. |
+| **team-exec** | `executor` | `debugger`, `executor` with `model: "opus"` | Match agent to subtask type. Escalate to opus for complex autonomous work. Use `debugger` for compilation issues. |
+| **team-verify** | `verifier` | `critic` | Always run `verifier`. Add `critic` for >20 files or architectural changes. |
+| **team-fix** | `executor` | `debugger`, `executor` with `model: "opus"` | Use `debugger` for type/build errors and regression isolation. Escalate `executor` to opus for complex multi-file fixes. |
+
+**Model override**: The `Agent` tool accepts a `model: "sonnet" | "opus" | "haiku"` parameter that overrides the agent file's default (set in frontmatter). Use this to escalate any agent to opus for complex work without maintaining separate agent files. Each agent's default model is defined in its own `.md` file (e.g., `executor` defaults to sonnet, `planner` defaults to opus, `explore` defaults to haiku).
 
 **Routing rules:**
 
@@ -229,7 +234,10 @@ Call `TaskCreate` for each subtask. Set dependencies with `TaskUpdate` using `ad
 }
 ```
 
-**Response stores a task file (e.g. `1.json`):**
+`TaskCreate` accepts only `{subject, description, activeForm?, metadata?}`. The
+on-disk task file (e.g. `1.json`) includes additional fields that are managed
+via subsequent `TaskUpdate` calls — NOT passed to `TaskCreate`:
+
 ```json
 {
   "id": "1",
@@ -242,6 +250,8 @@ Call `TaskCreate` for each subtask. Set dependencies with `TaskUpdate` using `ad
   "blockedBy": []
 }
 ```
+
+Fields `owner`, `status`, `blocks`, `blockedBy` are set via `TaskUpdate` (see below).
 
 For tasks with dependencies, use `TaskUpdate` after creation:
 
@@ -265,16 +275,20 @@ For tasks with dependencies, use `TaskUpdate` after creation:
 
 ### Phase 5: Spawn Teammates
 
-Spawn N teammates using `Task` with `team_name` and `name` parameters. Each teammate gets the team worker preamble (see below) plus their specific assignment.
+Spawn N teammates using `Agent` with `team_name` and `name` parameters. Each teammate gets the team worker preamble (see below) plus their specific assignment. The `description` field is required (3-5 words summarizing the worker's role). The `model` field optionally overrides the agent file's default (`"sonnet" | "opus" | "haiku"`).
 
 ```json
 {
   "subagent_type": "executor",
   "team_name": "fix-ts-errors",
   "name": "worker-1",
-  "prompt": "<worker-preamble + assigned tasks>"
+  "description": "fix auth type errors",
+  "prompt": "<worker-preamble + assigned tasks>",
+  "model": "opus"
 }
 ```
+
+Omit `model` to use the agent's default (e.g., `executor` defaults to sonnet).
 
 **Response:**
 ```json
@@ -308,43 +322,62 @@ The lead orchestrator monitors progress through two channels:
 
 **Coordination actions the lead can take:**
 
-- **Unblock a teammate:** Send a `message` with guidance or missing context
+- **Unblock a teammate:** Send a plain-text `SendMessage` with guidance or missing context
 - **Reassign work:** If a teammate finishes early, use `TaskUpdate` to assign pending tasks to them and notify via `SendMessage`
 - **Handle failures:** If a teammate reports failure, reassign the task or spawn a replacement
 
+**Peer discovery:** Teammates (and the lead) can read
+`~/.claude/teams/{team-name}/config.json` to enumerate team members. The
+`members` array lists each teammate with `name` (use for communication),
+`agentId` (reference only — never use for messaging), and `agentType`. Always
+address peers by `name`.
+
+**Idle notifications:** After every turn, teammates automatically go idle. The
+lead receives idle notifications; these are informational. Idle is NOT an error
+state — idle teammates can still receive messages. See Task Watchdog Policy for
+how to distinguish idle from stuck.
+
 #### Task Watchdog Policy
 
-Monitor for stuck or failed teammates:
+**Idle ≠ stuck.** Per official Claude Code semantics, teammates go idle after
+every turn. A teammate that sent a message and went idle is waiting for input,
+not dead. Do not treat idle as an error.
 
-- **Max in-progress age**: If a task stays `in_progress` for more than 5 minutes without messages, send a status check
-- **Suspected dead worker**: No messages + stuck task for 10+ minutes → reassign task to another worker
-- **Reassign threshold**: If a worker fails 2+ tasks, stop assigning new tasks to it
+**Signs of actual stuckness (all three must hold):**
+- A task remains `in_progress` with no `TaskUpdate` activity AND no inbound
+  `SendMessage` for a period clearly exceeding the task's expected complexity.
+- Your status-check ping goes unanswered after one full orchestration cycle.
+- No peer DM summary for the suspected worker in recent idle notifications.
+
+**Escalation sequence (never assume dead without verification):**
+1. Send a plain-text status-check `SendMessage` to the suspected-stuck teammate.
+2. If no response after one full orchestration cycle, reassign the task via
+   `TaskUpdate(taskId, owner=<new worker>)` and notify both the old and new
+   owners via `SendMessage`.
+3. If a worker fails 2+ reassigned tasks, stop routing new work to it and
+   report to the user.
 
 ### Phase 7: Completion
 
-When all real tasks (non-internal) are completed or failed:
+**IMPORTANT:** Only enter Phase 7 when the user explicitly requests teardown OR
+when a clear terminal condition is reached (all real tasks `completed` AND user
+confirmation). Do NOT auto-shutdown solely because all tasks hit `completed` —
+per official SendMessage docs: "Don't originate `shutdown_request` unless asked."
 
-1. **Verify results** — Check that all subtasks are marked `completed` via `TaskList`
-2. **Shutdown teammates** — Send `shutdown_request` to each active teammate:
+When authorized:
+
+1. **Verify results** — Check that all real tasks (metadata._internal != true) are marked `completed` via `TaskList`, and confirm with the user.
+2. **Shutdown teammates** — Send a wrapped `shutdown_request` to each active teammate:
    ```json
    {
-     "type": "shutdown_request",
-     "recipient": "worker-1",
-     "content": "All work complete, shutting down team"
+     "to": "worker-1",
+     "message": { "type": "shutdown_request", "reason": "All work complete, shutting down team" }
    }
    ```
-3. **Await responses** — Each teammate responds with `shutdown_response(approve: true)` and terminates
-4. **Delete team** — Call `TeamDelete` to clean up:
-   ```json
-   { "team_name": "fix-ts-errors" }
+3. **Await responses** — Each teammate responds with a wrapped `shutdown_response(approve: true)` and terminates
+4. **Delete team** — Call `TeamDelete` (no parameters; uses current team context):
    ```
-   Response:
-   ```json
-   {
-     "success": true,
-     "message": "Cleaned up directories and worktrees for team \"fix-ts-errors\"",
-     "team_name": "fix-ts-errors"
-   }
+   TeamDelete()
    ```
 5. **Report summary** — Present results to the user
 
@@ -352,7 +385,7 @@ When all real tasks (non-internal) are completed or failed:
 
 For large ambiguous tasks, run analysis before team creation:
 
-1. Spawn `Task(subagent_type="planner", ...)` with task description + codebase context
+1. Spawn `Agent(subagent_type="planner", ...)` with task description + codebase context
 2. Use the analysis to produce better task decomposition
 3. Create team and tasks with enriched context
 
@@ -360,7 +393,7 @@ This is especially useful when the task scope is unclear and benefits from exter
 
 ## Agent Preamble
 
-When spawning teammates, include this preamble in the prompt to establish the work protocol. Adapt it per teammate with their specific task assignments.
+When spawning teammates, include this preamble in the prompt to establish the work protocol. Replace `{team_name}` and `{worker_name}` with the actual values before sending. Adapt the preamble per teammate with their specific task assignments.
 
 ```
 You are a TEAM WORKER in team "{team_name}". Your name is "{worker_name}".
@@ -370,52 +403,66 @@ You are not the leader and must not perform leader orchestration actions.
 == WORK PROTOCOL ==
 
 1. CLAIM: Call TaskList to see your assigned tasks (owner = "{worker_name}").
-   Pick the first task with status "pending" that is assigned to you.
-   Call TaskUpdate to set status "in_progress":
-   {"taskId": "ID", "status": "in_progress", "owner": "{worker_name}"}
+   Skip any task whose metadata._internal is true — those are auto-created
+   lifecycle tasks, not real work. Pick the first real task with status "pending"
+   that is assigned to you. Call TaskUpdate to set status "in_progress":
+   {"taskId": "ID", "status": "in_progress"}
+   (Your owner was pre-assigned by the lead; do not re-set it here.)
 
 2. WORK: Execute the task using your tools (Read, Write, Edit, Bash).
    Do NOT spawn sub-agents. Do NOT delegate. Work directly.
 
-3. COMPLETE: When done, mark the task completed:
+3. COMPLETE: When done, mark the task completed via TaskUpdate:
    {"taskId": "ID", "status": "completed"}
 
-4. REPORT: Notify the lead via SendMessage:
-   {"type": "message", "recipient": "team-lead", "content": "Completed task #ID: <summary of what was done>", "summary": "Task #ID complete"}
+4. REPORT: After TaskUpdate, send a plain-text progress message to the lead:
+   SendMessage({"to": "team-lead", "message": "Task #ID complete: <one-line summary of what was done>", "summary": "Task #ID done"})
+   Plain text only — never wrap the message in {"type": "message", ...} or similar JSON.
 
-5. NEXT: Check TaskList for more assigned tasks. If you have more pending tasks, go to step 1.
-   If no more tasks are assigned to you, notify the lead:
-   {"type": "message", "recipient": "team-lead", "content": "All assigned tasks complete. Standing by.", "summary": "All tasks done, standing by"}
+5. NEXT: Check TaskList for more assigned real tasks (non-internal). If you have
+   more pending tasks, go to step 1. If no more tasks are assigned to you:
+   SendMessage({"to": "team-lead", "message": "All assigned tasks complete. Standing by.", "summary": "Standing by"})
 
-6. SHUTDOWN: When you receive a shutdown_request, respond with:
-   {"type": "shutdown_response", "request_id": "<from the request>", "approve": true}
+6. SHUTDOWN: When you receive a shutdown_request, respond by wrapping the
+   shutdown_response object inside the SendMessage `message` field:
+   SendMessage({"to": "team-lead", "message": {"type": "shutdown_response", "request_id": "<from incoming request>", "approve": true}})
+   The request_id is auto-generated by Claude Code and included in the inbound
+   shutdown_request payload — extract it; do NOT fabricate one.
 
 == BLOCKED TASKS ==
 If a task has blockedBy dependencies, skip it until those tasks are completed.
 Check TaskList periodically to see if blockers have been resolved.
 
 == ERRORS ==
-If you cannot complete a task, report the failure to the lead:
-{"type": "message", "recipient": "team-lead", "content": "FAILED task #ID: <reason>", "summary": "Task #ID failed"}
+If you cannot complete a task, report the failure via plain text:
+SendMessage({"to": "team-lead", "message": "FAILED task #ID: <reason>", "summary": "Task #ID failed"})
 Do NOT mark the task as completed. Leave it in_progress so the lead can reassign.
 
 == RULES ==
-- NEVER spawn sub-agents or use the Task tool
+- NEVER spawn sub-agents via the `Agent` tool (or the legacy `Task` tool)
 - NEVER run team spawning/orchestration skills or commands
 - ALWAYS use absolute file paths
-- ALWAYS report progress via SendMessage to "team-lead"
-- Use SendMessage with type "message" only -- never "broadcast"
+- ALWAYS report progress via plain-text SendMessage to "team-lead"
+- NEVER send structured JSON status messages (e.g. {"type":"task_completed",...});
+  use TaskUpdate for task state and plain text for communication
+- NEVER use "*" as recipient — only send to "team-lead" or named teammates.
+  Broadcast is reserved for the lead
+- Skip tasks whose metadata._internal is true — those are lifecycle tasks,
+  not real work
 ```
 
 ## Communication Patterns
+
+All communication goes through `SendMessage({to, message, summary})`. Messages are
+**plain text** by default. The only structured messages are `shutdown_request` /
+`shutdown_response` / `plan_approval_response`, which go inside the `message` field.
 
 ### Teammate to Lead (task completion report)
 
 ```json
 {
-  "type": "message",
-  "recipient": "team-lead",
-  "content": "Completed task #1: Fixed 3 type errors in src/auth/login.ts and 2 in src/auth/session.ts. All files pass tsc --noEmit.",
+  "to": "team-lead",
+  "message": "Completed task #1: Fixed 3 type errors in src/auth/login.ts and 2 in src/auth/session.ts. All files pass tsc --noEmit.",
   "summary": "Task #1 complete"
 }
 ```
@@ -424,40 +471,50 @@ Do NOT mark the task as completed. Leave it in_progress so the lead can reassign
 
 ```json
 {
-  "type": "message",
-  "recipient": "worker-2",
-  "content": "Task #3 is now unblocked. Also pick up task #5 which was originally assigned to worker-1.",
+  "to": "worker-2",
+  "message": "Task #3 is now unblocked. Also pick up task #5 which was originally assigned to worker-1.",
   "summary": "New task assignment"
 }
 ```
 
-### Broadcast (use sparingly — sends N separate messages)
+### Broadcast (use sparingly — sends N separate messages, O(N) cost)
 
 ```json
 {
-  "type": "broadcast",
-  "content": "STOP: shared types in src/types/index.ts have changed. Pull latest before continuing.",
+  "to": "*",
+  "message": "STOP: shared types in src/types/index.ts have changed. Pull latest before continuing.",
   "summary": "Shared types changed"
 }
 ```
 
+Broadcast delivers a separate message to every teammate. Prefer DMs for targeted
+coordination; reserve `to: "*"` for truly team-wide critical alerts.
+
 ### Shutdown Protocol (BLOCKING)
 
-**CRITICAL: Steps must execute in exact order. Never call TeamDelete before shutdown is confirmed.**
+**CRITICAL:** Steps must execute in exact order. Never call `TeamDelete` before
+shutdown is confirmed. **Only originate a `shutdown_request` when the user
+explicitly requests teardown, OR when a clear terminal condition is reached
+(all real tasks `completed` AND user confirmation). Do NOT auto-shutdown merely
+because all tasks hit `completed`.** (Per official SendMessage docs: "Don't
+originate shutdown_request unless asked.")
 
 **Step 1: Verify completion**
 ```
-Call TaskList — verify all real tasks (non-internal) are completed or failed.
+Call TaskList — verify all real tasks (metadata._internal != true) are
+completed or failed. Confirm with the user before proceeding.
 ```
 
 **Step 2: Request shutdown from each teammate**
 
-**Lead sends:**
+The lead sends a structured `shutdown_request` wrapped inside SendMessage's
+`message` field. Note: `summary` is optional when `message` is a structured
+object — omit it.
+
 ```json
 {
-  "type": "shutdown_request",
-  "recipient": "worker-1",
-  "content": "All work complete, shutting down team"
+  "to": "worker-1",
+  "message": { "type": "shutdown_request", "reason": "All work complete, shutting down team" }
 }
 ```
 
@@ -466,14 +523,19 @@ Call TaskList — verify all real tasks (non-internal) are completed or failed.
 - Track which teammates confirmed vs timed out
 - If a teammate doesn't respond within 30s: log warning, mark as unresponsive
 
-**Teammate receives and responds:**
+The teammate receives the request and responds by wrapping `shutdown_response`
+inside SendMessage's `message` field:
+
 ```json
 {
-  "type": "shutdown_response",
-  "request_id": "shutdown-1770428632375@worker-1",
-  "approve": true
+  "to": "team-lead",
+  "message": { "type": "shutdown_response", "request_id": "<extracted from incoming request>", "approve": true }
 }
 ```
+
+`request_id` is auto-generated by Claude Code when the lead sends
+`shutdown_request`. The teammate extracts it from the inbound message payload
+and echoes it in the response. **Do NOT fabricate request IDs.**
 
 After approval:
 - Teammate process terminates
@@ -481,15 +543,17 @@ After approval:
 - Internal task for that teammate completes
 
 **Step 4: TeamDelete — only after ALL teammates confirmed or timed out**
-```json
-{ "team_name": "fix-ts-errors" }
+
 ```
+TeamDelete()
+```
+
+`TeamDelete` takes **no parameters**; the team name is automatically determined
+from the current session's team context.
 
 **Shutdown sequence is BLOCKING:** Do not proceed to TeamDelete until all teammates have either:
 - Confirmed shutdown (`shutdown_response` with `approve: true`), OR
 - Timed out (30s with no response)
-
-**IMPORTANT:** The `request_id` is provided in the shutdown request message that the teammate receives. The teammate must extract it and pass it back. Do NOT fabricate request IDs.
 
 ## Error Handling
 
@@ -519,7 +583,7 @@ After approval:
 1. Internal task for that teammate will show unexpected status
 2. Teammate disappears from `config.json` members
 3. Lead reassigns orphaned tasks to remaining workers
-4. If needed, spawn a replacement teammate with `Task(team_name, name)`
+4. If needed, spawn a replacement teammate with `Agent(team_name, name)`
 
 ## Idempotent Recovery
 
@@ -551,28 +615,7 @@ On successful completion, `TeamDelete` handles all Claude Code state:
 
 **IMPORTANT:** Call `TeamDelete` only AFTER all teammates have been shut down. `TeamDelete` will fail if active members (besides the lead) still exist in the config.
 
-> **Note:** Team members do not have a hardcoded model default. Each teammate is a separate Claude Code session that inherits the user's configured model. Since teammates can spawn their own subagents, the session model acts as the orchestration layer while subagents can use any model tier.
-
-## Git Worktree Integration
-
-Teammates can operate in isolated git worktrees to prevent file conflicts between concurrent workers.
-
-### How It Works
-
-1. **Worktree creation**: Before spawning a worker, create an isolated worktree at `.claude/worktrees/{team}/{worker}` with branch `team/{teamName}/{workerName}`.
-
-2. **Worker isolation**: Pass the worktree path as the working directory in the worker's context. The worker operates exclusively in its own worktree.
-
-3. **Merge coordination**: After a worker completes its tasks, verify the branch can be cleanly merged, then merge with `--no-ff` for clear history.
-
-4. **Team cleanup**: On team shutdown, remove all worktrees and their branches.
-
-### Important Notes
-
-- Worktree lifecycle is managed separately from team session lifecycle
-- Worktrees are NOT cleaned up on individual worker shutdown — only on team shutdown, to allow post-mortem inspection
-- Branch names should be sanitized to prevent injection
-- All paths must be validated against directory traversal
+> **Note on model defaults:** Each agent's default model is set in its own frontmatter (e.g., `model: claude-sonnet-4-6` in `executor.md`). The lead can override per-spawn via the `model` parameter on the `Agent` tool (`"sonnet" | "opus" | "haiku"`). Since teammates can spawn their own subagents, the session model acts as the orchestration layer while subagents can use any model tier.
 
 ## Gotchas
 
