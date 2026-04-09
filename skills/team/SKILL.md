@@ -5,7 +5,7 @@ argument-hint: "[N:agent-type] <task description>"
 aliases: []
 ---
 
-<!-- team skill: kyw_agent_harness v2.5.1-fix1 (aligned with Claude Code 2.1 schema) -->
+<!-- team skill: kyw_agent_harness v2.5.1-fix2 (aligned with Claude Code 2.1 schema, 6-issue patch) -->
 
 # Team Skill
 
@@ -96,7 +96,7 @@ Each pipeline stage uses **specialized agents** — not just executors. The lead
 | **team-plan** | `explore`, `planner` | `analyst`, `architect` | Use `analyst` for unclear requirements. Use `architect` for systems with complex boundaries. |
 | **team-prd** | `analyst` | `critic` | Use `critic` to challenge scope. |
 | **team-exec** | `executor` | `debugger`, `executor` with `model: "opus"` | Match agent to subtask type. Escalate to opus for complex autonomous work. Use `debugger` for compilation issues. |
-| **team-verify** | `verifier` | `critic` | Always run `verifier`. Add `critic` for >20 files or architectural changes. |
+| **team-verify** | `verifier` | `critic` | Always run `verifier`. Add `critic` for >20 files, architectural changes, or security-sensitive work — `critic` includes security engineer perspective in its multi-perspective review, covering the role of a dedicated security reviewer. |
 | **team-fix** | `executor` | `debugger`, `executor` with `model: "opus"` | Use `debugger` for type/build errors and regression isolation. Escalate `executor` to opus for complex multi-file fixes. |
 
 **Model override**: The `Agent` tool accepts a `model: "sonnet" | "opus" | "haiku"` parameter that overrides the agent file's default (set in frontmatter). Use this to escalate any agent to opus for complex work without maintaining separate agent files. Each agent's default model is defined in its own `.md` file (e.g., `executor` defaults to sonnet, `planner` defaults to opus, `explore` defaults to haiku).
@@ -145,7 +145,7 @@ When transitioning between stages, important context — decisions made, alterna
 
 **Each completing stage MUST produce a handoff document before transitioning.**
 
-The lead writes handoffs to `handoffs/<stage-name>.md` (relative to the working directory).
+The lead writes handoffs to `~/.claude/teams/{team-name}/handoffs/<stage-name>.md`.
 
 #### Handoff Format
 
@@ -162,7 +162,7 @@ The lead writes handoffs to `handoffs/<stage-name>.md` (relative to the working 
 
 1. **Lead reads previous handoff BEFORE spawning next stage's agents.** The handoff content is included in the next stage's agent spawn prompts, ensuring agents start with full context.
 2. **Handoffs accumulate.** The verify stage can read all prior handoffs (plan → prd → exec) for full decision history.
-3. **On team cancellation, handoffs survive** in `handoffs/` for session resume. They are not deleted by `TeamDelete`.
+3. **On team cancellation, preserve handoffs before cleanup.** Since handoffs live inside `~/.claude/teams/{team-name}/`, `TeamDelete` will remove them. Before calling `TeamDelete` during cancellation, copy handoffs to a project-local backup (e.g., `.team-handoffs/{team-name}/`) if resume may be needed later.
 4. **Handoffs are lightweight.** 10-20 lines max. They capture decisions and rationale, not full specifications (those live in deliverable files like DESIGN.md).
 
 #### Example
@@ -178,11 +178,27 @@ The lead writes handoffs to `handoffs/<stage-name>.md` (relative to the working 
 
 ### Resume and Cancel Semantics
 
-- **Resume:** restart from the last non-terminal stage using staged state + live task status. Read `handoffs/` to recover stage transition context.
-- **Cancel:** request teammate shutdown, wait for responses (best effort), mark phase `cancelled`, capture cancellation metadata, then delete team resources. Handoff files in `handoffs/` are preserved for potential resume.
+- **Resume:** check `~/.claude/teams/{team-name}/config.json` for team existence, `~/.claude/tasks/{team-name}/` for task status, and `~/.claude/teams/{team-name}/handoffs/` for stage transition history. The most recent handoff file indicates the last completed stage. Resume from the next stage in the pipeline. If the team was fully deleted, check for a project-local backup at `.team-handoffs/{team-name}/` (created during cancellation) to recover stage context.
+- **Cancel:** request teammate shutdown, wait for responses (best effort), copy handoffs to `.team-handoffs/{team-name}/` for potential resume, then call `TeamDelete` to clean up team resources.
 - Terminal states are `complete`, `failed`, and `cancelled`.
 
 ## Workflow
+
+### Phase 0: Pre-flight
+
+Before creating a team, verify the experimental flag is enabled:
+
+1. Check that `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` is set to `1` in either:
+   - Shell environment (`echo $CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`)
+   - `~/.claude/settings.json` → `env` block
+   - Project `.claude/settings.json` → `env` block
+2. If not set, add to the appropriate settings.json:
+   ```json
+   { "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" } }
+   ```
+3. Verify Claude Code version >= 2.1.32 (`claude --version`)
+
+If either check fails, inform the user and stop. Do not attempt `TeamCreate` without the flag — it will fail silently or error.
 
 ### Phase 1: Parse Input
 
@@ -192,7 +208,7 @@ The lead writes handoffs to `handoffs/<stage-name>.md` (relative to the working 
 
 ### Phase 2: Analyze & Decompose
 
-Use `explore` or `architect` (via Task tool) to analyze the codebase and break the task into N subtasks:
+Use `explore` or `architect` (via Agent tool) to analyze the codebase and break the task into N subtasks:
 
 - Each subtask should be **file-scoped** or **module-scoped** to avoid conflicts
 - Subtasks must be independent or have clear dependency ordering
@@ -263,7 +279,7 @@ For tasks with dependencies, use `TaskUpdate` after creation:
 }
 ```
 
-**Pre-assign owners from the lead** to avoid race conditions (there is no atomic claiming):
+**Pre-assign owners from the lead** to avoid contention (file locking exists, but pre-assignment is cleaner):
 
 ```json
 // Assign task #1 to worker-1
@@ -375,7 +391,7 @@ When authorized:
    }
    ```
 3. **Await responses** — Each teammate responds with a wrapped `shutdown_response(approve: true)` and terminates
-4. **Delete team** — Call `TeamDelete` (no parameters; uses current team context):
+4. **Delete team** — Call `TeamDelete` (uses current team context, no parameters):
    ```
    TeamDelete()
    ```
@@ -548,8 +564,9 @@ After approval:
 TeamDelete()
 ```
 
-`TeamDelete` takes **no parameters**; the team name is automatically determined
-from the current session's team context.
+`TeamDelete` uses the current session's team context and accepts no parameters.
+If it fails, the lead may have lost team context — manually clean up
+`~/.claude/teams/{team_name}/` and `~/.claude/tasks/{team_name}/` as a last resort.
 
 **Shutdown sequence is BLOCKING:** Do not proceed to TeamDelete until all teammates have either:
 - Confirmed shutdown (`shutdown_response` with `approve: true`), OR
@@ -621,7 +638,7 @@ On successful completion, `TeamDelete` handles all Claude Code state:
 
 1. **Internal tasks pollute TaskList** — When a teammate is spawned, the system auto-creates an internal task with `metadata._internal: true`. These appear in `TaskList` output. Filter them when counting real task progress. The subject of an internal task is the teammate's name.
 
-2. **No atomic claiming** — There is no transactional guarantee on `TaskUpdate`. Two teammates could race to claim the same task. **Mitigation:** The lead should pre-assign owners via `TaskUpdate(taskId, owner)` before spawning teammates. Teammates should only work on tasks assigned to them.
+2. **Task claiming has file locking, but pre-assignment is preferred** — Claude Code uses file locking to prevent race conditions on concurrent claims. However, the lead should still pre-assign owners via `TaskUpdate(taskId, owner)` before spawning teammates to avoid contention entirely. Teammates should only work on tasks assigned to them.
 
 3. **Task IDs are strings** — IDs are auto-incrementing strings ("1", "2", "3"), not integers. Always pass string values to `taskId` fields.
 
@@ -633,7 +650,7 @@ On successful completion, `TeamDelete` handles all Claude Code state:
 
 7. **Members auto-removed on shutdown** — After a teammate approves shutdown and terminates, it is automatically removed from `config.json`. Do not re-read config expecting to find shut-down teammates.
 
-8. **shutdown_response needs request_id** — The teammate must extract the `request_id` from the incoming shutdown request JSON and pass it back. The format is `shutdown-{timestamp}@{worker-name}`. Fabricating this ID will cause the shutdown to fail silently.
+8. **shutdown_response needs request_id** — The teammate must extract the `request_id` from the delivered shutdown message and echo it back. The runtime injects `request_id` during message delivery — it is not part of the `shutdown_request` schema as sent by the lead. Do not fabricate this value; extract whatever the runtime provides.
 
 9. **Team name must be a valid slug** — Use lowercase letters, numbers, and hyphens. Derive from the task description (e.g., "fix TypeScript errors" becomes "fix-ts-errors").
 
