@@ -67,7 +67,7 @@ User: "/team 3:executor fix all TypeScript errors"
               +-- Completion
                       -> SendMessage(shutdown_request) to each teammate
                       <- SendMessage(shutdown_response, approve: true)
-                      -> TeamDelete("fix-ts-errors")
+                      -> TeamDelete()
 ```
 
 **Storage layout (managed by Claude Code):**
@@ -578,6 +578,17 @@ After approval:
 - Teammate process terminates
 - Teammate auto-removed from `config.json` members array
 - Internal task for that teammate completes
+
+**Step 3.5: Back up handoffs before cleanup**
+
+Handoffs live inside `~/.claude/teams/{team-name}/handoffs/`, which `TeamDelete`
+will remove. Copy them to a project-local backup so they survive cleanup:
+
+```
+cp -r ~/.claude/teams/{team-name}/handoffs/ .team-handoffs/{team-name}/
+```
+
+Skip this step if no handoff files exist or if resume is not needed.
 
 **Step 4: TeamDelete — only after ALL teammates confirmed or timed out**
 

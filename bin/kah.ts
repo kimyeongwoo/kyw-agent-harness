@@ -306,12 +306,13 @@ function cmdTeam(): void {
       break;
     default:
       console.log(`Usage:
-  kah team install [--force]  Install /team SKILL and agents to ~/.claude/
+  kah team install [options]  Install /team SKILL and agents to ~/.claude/
   kah team uninstall          Remove kah-managed SKILL and agents from ~/.claude/
 
 Options:
-  --force    Overwrite files even if they lack the kah-managed marker (user files).
-             Without this flag, user-modified files are skipped to avoid data loss.
+  --force          Overwrite files even if they lack the kah-managed marker (user files).
+                   Without this flag, user-modified files are skipped to avoid data loss.
+  --enable-teams   Auto-set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in ~/.claude/settings.json.
 
 Description:
   install:   Copies skills/team/SKILL.md and agents/*.md from this package to
@@ -428,10 +429,30 @@ function cmdTeamInstall(): void {
       } catch {}
     }
   }
+  if (!envVarSet && process.argv.includes('--enable-teams')) {
+    const settingsPath = resolve(claudeDir, 'settings.json');
+    let settings: Record<string, unknown> = {};
+    if (existsSync(settingsPath)) {
+      try {
+        settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+      } catch {
+        writeFileSync(`${settingsPath}.bak`, readFileSync(settingsPath));
+      }
+    }
+    const env = ensureObject(settings.env);
+    env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1';
+    settings.env = env;
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+    console.log('');
+    console.log('[kah] Enabled CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in ~/.claude/settings.json');
+    envVarSet = true;
+  }
   if (!envVarSet) {
     console.log('');
     console.log('[!] CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS is not set to "1".');
-    console.log('    The /team SKILL requires this to function. Add to ~/.claude/settings.json:');
+    console.log('    The /team SKILL requires this to function. Either:');
+    console.log('    - Re-run with: kah team install --enable-teams');
+    console.log('    - Or add manually to ~/.claude/settings.json:');
     console.log('    { "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" } }');
   }
 }
