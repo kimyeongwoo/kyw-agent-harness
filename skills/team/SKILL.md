@@ -5,7 +5,8 @@ argument-hint: "[N:agent-type] <task description>"
 aliases: []
 ---
 
-<!-- team skill: kyw_agent_harness v2.5.1-fix2 (aligned with Claude Code 2.1 schema, 6-issue patch) -->
+<!-- kah-managed -->
+<!-- team skill: kyw_agent_harness v2.5.2 (aligned with Claude Code 2.1 schema) -->
 
 # Team Skill
 
@@ -379,6 +380,12 @@ not dead. Do not treat idle as an error.
 when a clear terminal condition is reached (all real tasks `completed` AND user
 confirmation). Do NOT auto-shutdown solely because all tasks hit `completed` —
 per official SendMessage docs: "Don't originate `shutdown_request` unless asked."
+
+**When all real tasks reach `completed` status:** Proactively inform the user that
+all work is done and ask whether they want to tear down the team. Example:
+"All N tasks are completed. Would you like me to shut down the team, or do you
+want to review the results first?" This avoids idle resource waste while respecting
+the no-auto-shutdown policy.
 
 When authorized:
 
