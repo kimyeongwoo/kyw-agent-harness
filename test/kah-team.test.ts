@@ -62,10 +62,11 @@ describe('source file validation', () => {
     expect(content).toContain(KAH_MARKER);
   });
 
-  it('SKILL.md version comment matches package.json version', () => {
-    const pkg = JSON.parse(readText(resolve(PACKAGE_ROOT, 'package.json')));
+  it('SKILL.md version comment is version-agnostic', () => {
     const skillContent = readText(SOURCE_SKILL);
-    expect(skillContent).toContain(`kyw_agent_harness v${pkg.version}`);
+    expect(skillContent).toContain('team skill: kyw_agent_harness (aligned with Claude Code');
+    // Ensure no hardcoded version number in the comment
+    expect(skillContent).not.toMatch(/team skill: kyw_agent_harness v\d+\.\d+/);
   });
 
   it('no agent files reference non-existent agents in handoff/responsibility lists', () => {

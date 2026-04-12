@@ -306,8 +306,12 @@ function cmdTeam(): void {
       break;
     default:
       console.log(`Usage:
-  kah team install      Install /team SKILL and agents to ~/.claude/
-  kah team uninstall    Remove kah-managed SKILL and agents from ~/.claude/
+  kah team install [--force]  Install /team SKILL and agents to ~/.claude/
+  kah team uninstall          Remove kah-managed SKILL and agents from ~/.claude/
+
+Options:
+  --force    Overwrite files even if they lack the kah-managed marker (user files).
+             Without this flag, user-modified files are skipped to avoid data loss.
 
 Description:
   install:   Copies skills/team/SKILL.md and agents/*.md from this package to

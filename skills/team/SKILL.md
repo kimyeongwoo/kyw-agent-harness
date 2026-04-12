@@ -6,7 +6,7 @@ aliases: []
 ---
 
 <!-- kah-managed -->
-<!-- team skill: kyw_agent_harness v2.5.2 (aligned with Claude Code 2.1 schema) -->
+<!-- team skill: kyw_agent_harness (aligned with Claude Code 2.1 schema) -->
 
 # Team Skill
 
@@ -24,6 +24,7 @@ Spawn N coordinated agents working on a shared task list using Claude Code's nat
 ### Parameters
 
 - **N** — Number of teammate agents (1-20). Optional; defaults to auto-sizing based on task decomposition.
+  - **Guideline:** Start with 3-5 teammates. Aim for 5-6 tasks per teammate. Larger teams increase coordination overhead without proportional throughput gains.
 - **agent-type** — Agent to spawn for the `team-exec` stage (e.g., `executor`, `debugger`). Optional; defaults to stage-aware routing. See Stage Agent Routing below.
 - **task** — High-level task to decompose and distribute among teammates.
 
@@ -306,6 +307,19 @@ Spawn N teammates using `Agent` with `team_name` and `name` parameters. Each tea
 ```
 
 Omit `model` to use the agent's default (e.g., `executor` defaults to sonnet).
+
+**Plan approval mode:** For complex or risky tasks, spawn teammates with `mode: "plan"` to require plan approval before implementation. The teammate works in read-only plan mode until the lead approves their approach via `SendMessage`. This is useful for architectural changes, security-sensitive work, or when the lead wants to validate the approach before execution begins.
+
+```json
+{
+  "subagent_type": "executor",
+  "team_name": "fix-ts-errors",
+  "name": "worker-1",
+  "description": "fix auth type errors",
+  "prompt": "<worker-preamble + assigned tasks>",
+  "mode": "plan"
+}
+```
 
 **Response:**
 ```json
@@ -662,3 +676,9 @@ On successful completion, `TeamDelete` handles all Claude Code state:
 9. **Team name must be a valid slug** — Use lowercase letters, numbers, and hyphens. Derive from the task description (e.g., "fix TypeScript errors" becomes "fix-ts-errors").
 
 10. **Broadcast is expensive** — Each broadcast sends a separate message to every teammate. Use `message` (DM) by default. Only broadcast for truly team-wide critical alerts.
+
+11. **skills/mcpServers frontmatter not applied to teammates** — The `skills` and `mcpServers` frontmatter fields in a subagent definition are not applied when that definition runs as a teammate. Teammates inherit the lead's MCP server configuration but do not load skill-specific or agent-specific MCP servers declared in frontmatter.
+
+12. **/resume and /rewind do not restore teammates** — Claude Code's `/resume` and `/rewind` commands do not restore in-process teammates. If the lead session is resumed, you must manually re-detect the team state and respawn teammates as needed (see Idempotent Recovery).
+
+13. **Hooks enable quality gates** — Use `TeammateIdle`, `TaskCreated`, and `TaskCompleted` hooks to enforce quality checks. A hook returning exit code 2 sends its stdout as feedback to the agent, allowing automated review gates (e.g., running linters or tests on task completion). Configure hooks in `.claude/settings.json` under the `hooks` key.
