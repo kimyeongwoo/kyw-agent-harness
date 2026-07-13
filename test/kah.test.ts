@@ -82,90 +82,20 @@ describe('kah init', () => {
   });
 });
 
-describe('kah team install', () => {
-  const tempDirs: string[] = [];
-
-  afterEach(() => {
-    while (tempDirs.length > 0) {
-      const dir = tempDirs.pop();
-      if (dir) {
-        try { rmSync(dir, { recursive: true, force: true }); } catch {}
-      }
-    }
-  });
-
-  it('copies SKILL.md and agents to ~/.claude and is idempotent', () => {
-    const homeDir = createTempDir('kah-team-test-');
-    tempDirs.push(homeDir);
-
-    const env = {
-      ...process.env,
-      HOME: homeDir,
-      USERPROFILE: homeDir,
-    };
-
-    // First run: should copy files
-    const first = Bun.spawnSync([process.execPath, KAH_SCRIPT, 'team', 'install'], {
-      env,
+describe('kah help', () => {
+  it('does not expose or package the removed team feature', () => {
+    const result = Bun.spawnSync([process.execPath, KAH_SCRIPT, 'team'], {
       stdout: 'pipe',
       stderr: 'pipe',
     });
 
-    expect(first.exitCode).toBe(0);
+    expect(result.exitCode).toBe(0);
+    const stdout = result.stdout.toString();
+    expect(stdout).not.toContain('kah team');
+    expect(stdout).not.toContain('/team');
 
-    const destSkillFile = resolve(homeDir, '.claude', 'skills', 'team', 'SKILL.md');
-    const destExecutorFile = resolve(homeDir, '.claude', 'agents', 'executor.md');
-    const destVerifierFile = resolve(homeDir, '.claude', 'agents', 'verifier.md');
-
-    expect(existsSync(destSkillFile)).toBe(true);
-    expect(existsSync(destExecutorFile)).toBe(true);
-    expect(existsSync(destVerifierFile)).toBe(true);
-
-    // Verify content matches source (sanity check that the copy works correctly)
-    const sourceSkill = readText(resolve(PACKAGE_ROOT, 'skills', 'team', 'SKILL.md'));
-    expect(readText(destSkillFile)).toBe(sourceSkill);
-
-    // Regression guard: ensure no OMC-specific artifacts leaked in
-    const omcKeywords = [
-      'oh-my-claudecode',
-      '.omc/',
-      'state_write',
-      'linked_ralph',
-      'RALPLAN',
-      'cleanup-orphans',
-      'omc team',
-      'codex_worker',
-      'gemini_worker',
-    ];
-    for (const kw of omcKeywords) {
-      expect(readText(destSkillFile)).not.toContain(kw);
-      expect(readText(destExecutorFile)).not.toContain(kw);
-      expect(readText(destVerifierFile)).not.toContain(kw);
-    }
-
-    // Regression guard: SendMessage must use {to, message} — not legacy {type, recipient, content}
-    const skillText = readText(destSkillFile);
-    // The only permitted "type": "message" is the negative-instruction excerpt in the
-    // Worker Preamble (step 4), which explicitly tells workers NOT to use that format.
-    const typeMessageMatches = skillText.match(/"type":\s*"message"/g) || [];
-    expect(typeMessageMatches.length).toBeLessThanOrEqual(1);
-    expect(skillText).not.toMatch(/"type":\s*"broadcast"/);
-    expect(skillText).not.toContain('"recipient":');
-    // Positive patterns should exist
-    expect(skillText).toContain('"to":');
-    expect(skillText).toContain('"message":');
-    expect(skillText).toContain('Agent(');
-
-    // Second run: should be idempotent (no .bak files created)
-    const second = Bun.spawnSync([process.execPath, KAH_SCRIPT, 'team', 'install'], {
-      env,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    });
-
-    expect(second.exitCode).toBe(0);
-    const stdout = second.stdout.toString();
-    expect(stdout).toContain('[SKIP] Already up to date');
-    expect(existsSync(`${destSkillFile}.bak`)).toBe(false);
+    const packageJson = JSON.parse(readText(resolve(PACKAGE_ROOT, 'package.json'))) as { files: string[] };
+    expect(packageJson.files).not.toContain('skills/');
+    expect(packageJson.files).not.toContain('agents/');
   });
 });

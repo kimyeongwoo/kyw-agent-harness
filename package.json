@@ -1,6 +1,6 @@
 {
   "name": "@kimyw/kyw-agent-harness",
-  "version": "2.6.2",
+  "version": "3.0.0",
   "type": "module",
   "publishConfig": {
     "access": "public"
@@ -16,8 +16,6 @@
     "bin/",
     "src/",
     "scripts/",
-    "skills/",
-    "agents/",
     "start-claude.ts",
     "start-codex.ts"
   ],
