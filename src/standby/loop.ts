@@ -18,9 +18,11 @@ const STANDBY_REPLY_AND_STOP_TOKEN = '[[STANDBY_REPLY_AND_STOP]]';
 export interface StandbyStatus {
   enabled: boolean;
   disabled_reason?: string;
+  paused_reason?: string;
   last_reply_at?: string;
   last_error?: string;
   last_handled_seq?: number;
+  last_model?: string;
 }
 
 interface StandbyLoopOptions {
@@ -28,6 +30,9 @@ interface StandbyLoopOptions {
   brokerClient: BrokerClient;
   server: Server;
   isSingleInstanceSafe?: () => boolean;
+  getPauseReason?: () => string | undefined;
+  modelHint?: string;
+  requireModelMatch?: boolean;
   logPrefix: string;
 }
 
@@ -211,9 +216,11 @@ export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandl
   let stopped = false;
   let running = false;
   let disabledReason: string | undefined = undefined;
+  let pausedReason: string | undefined = undefined;
   let lastReplyAt: string | undefined = undefined;
   let lastError: string | undefined = undefined;
   let lastHandledSeq = 0;
+  let lastModel: string | undefined = undefined;
 
   function terminate(reason: string): void {
     disabledReason = reason;
@@ -231,6 +238,7 @@ export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandl
       messages: [{ role: 'user', content: { type: 'text', text: request.userPrompt } }],
       includeContext: 'none',
       modelPreferences: {
+        ...(options.modelHint ? { hints: [{ name: options.modelHint }] } : {}),
         costPriority: 0,
         speedPriority: 0,
         intelligencePriority: 1,
@@ -243,10 +251,27 @@ export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandl
       resetTimeoutOnProgress: true,
     }) as CreateMessageResult;
 
+    lastModel = response.model;
+    if (options.requireModelMatch && options.modelHint) {
+      const expected = options.modelHint.toLowerCase();
+      const actual = response.model?.toLowerCase() ?? '';
+      if (!actual.includes(expected)) {
+        throw new StandbyManualReplyRequiredError(
+          `sampling model mismatch: required '${options.modelHint}', received '${response.model || 'unknown'}'; manual reply required`,
+        );
+      }
+    }
+
     return flattenSamplingContent(response.content);
   }
 
   async function step(): Promise<void> {
+    pausedReason = options.getPauseReason?.();
+    if (pausedReason) {
+      await Bun.sleep(STANDBY_IDLE_DELAY_MS);
+      return;
+    }
+
     if (options.isSingleInstanceSafe && !options.isSingleInstanceSafe()) {
       await Bun.sleep(STANDBY_IDLE_DELAY_MS);
       return;
@@ -351,6 +376,7 @@ export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandl
           disabledReason = undefined;
         }
       }
+      pausedReason = options.getPauseReason?.();
       running = true;
       void run().finally(() => { running = false; });
     },
@@ -359,11 +385,13 @@ export function createStandbyLoop(options: StandbyLoopOptions): StandbyLoopHandl
     },
     getStatus(): StandbyStatus {
       return {
-        enabled: disabledReason === undefined,
+        enabled: disabledReason === undefined && pausedReason === undefined,
         disabled_reason: disabledReason,
+        paused_reason: pausedReason,
         last_reply_at: lastReplyAt,
         last_error: lastError,
         last_handled_seq: lastHandledSeq > 0 ? lastHandledSeq : undefined,
+        last_model: lastModel,
       };
     },
   };

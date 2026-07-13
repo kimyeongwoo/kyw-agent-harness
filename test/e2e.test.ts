@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdirSync, rmSync } from 'fs';
 import { resolve } from 'path';
 import { stopBrokerForWorkspace } from '../src/lib/broker-client.js';
+import { WorkflowStore } from '../src/workflow/store.js';
 
 const TEST_WORKSPACE = resolve(import.meta.dir, '.test-workspace-e2e');
 const PACKAGE_ROOT = resolve(import.meta.dir, '..');
@@ -255,4 +256,79 @@ describe('E2E: Claude ↔ Codex via broker', () => {
       killMcp(codex);
     }
   }, 15000);
+
+  it('enforces the Fable design -> Codex review -> user approval -> implementation workflow', async () => {
+    const workflowSlot = slot('e2e-workflow');
+    const store = new WorkflowStore(TEST_WORKSPACE);
+    const createdTask = await store.createTask({
+      type: 'existing-change',
+      title: 'Workflow E2E',
+      goal: 'Verify the structured design and implementation gates.',
+      slot: workflowSlot,
+    });
+    const claude = spawnMcp(CLAUDE_MCP, { BRIDGE_SLOT: workflowSlot });
+    const codex = spawnMcp(CODEX_MCP, { BRIDGE_SLOT: workflowSlot });
+
+    try {
+      await initializeMcp(claude);
+      await initializeMcp(codex);
+
+      await callTool(claude, 'begin_design', { task_id: createdTask.task_id });
+      const designResult = await callTool(claude, 'submit_design', {
+        task_id: createdTask.task_id,
+        repository_facts: 'The repository facts were verified against source files.',
+        requirements: 'Goal: verify workflow gates. Non-goal: unrelated refactoring.',
+        architecture: 'Use a small, backwards-compatible module boundary.',
+        implementation_plan: '1. Add module.\n2. Add tests.\n3. Run verification.',
+        acceptance_criteria: '- New behavior works.\n- Existing behavior remains compatible.',
+        test_plan: '- Unit tests\n- Integration tests',
+        risks: '- Migration risk is mitigated by rollback.',
+      }) as { task: { status: string; design_version: number }; notification: { sent: boolean } };
+      expect(designResult.task.status).toBe('awaiting_review');
+      expect(designResult.task.design_version).toBe(1);
+      expect(designResult.notification.sent).toBe(true);
+
+      const reviewNotice = await callTool(codex, 'check_messages') as {
+        has_new: boolean;
+        messages: Array<{ content: string }>;
+      };
+      expect(reviewNotice.has_new).toBe(true);
+      expect(reviewNotice.messages[0].content).toContain('ready for feasibility review');
+
+      const reviewResult = await callTool(codex, 'submit_design_review', {
+        task_id: createdTask.task_id,
+        verdict: 'approved',
+        review: 'Repository evidence and implementation steps are feasible.',
+      }) as { task: { status: string } };
+      expect(reviewResult.task.status).toBe('awaiting_approval');
+
+      await store.approveTask(createdTask.task_id);
+      const implementationStart = await callTool(codex, 'start_implementation', {
+        task_id: createdTask.task_id,
+      }) as { task: { status: string } };
+      expect(implementationStart.task.status).toBe('implementing');
+
+      const reportResult = await callTool(codex, 'report_implementation', {
+        task_id: createdTask.task_id,
+        summary: 'Implemented the approved module.',
+        changed_files: ['src/example.ts', 'test/example.test.ts'],
+        tests: 'All unit and integration tests passed.',
+      }) as { task: { status: string }; notification: { sent: boolean } };
+      expect(reportResult.task.status).toBe('awaiting_validation');
+      expect(reportResult.notification.sent).toBe(true);
+
+      const validationResult = await callTool(claude, 'submit_validation', {
+        task_id: createdTask.task_id,
+        verdict: 'pass',
+        report: 'The implementation matches design v1 and the acceptance criteria.',
+      }) as { task: { status: string } };
+      expect(validationResult.task.status).toBe('awaiting_completion_approval');
+
+      const completed = await store.completeTask(createdTask.task_id);
+      expect(completed.status).toBe('completed');
+    } finally {
+      killMcp(claude);
+      killMcp(codex);
+    }
+  }, 20000);
 });

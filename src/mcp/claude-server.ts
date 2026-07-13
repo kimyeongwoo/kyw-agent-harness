@@ -1,11 +1,9 @@
-import { randomUUID } from 'crypto';
 import { unlinkSync } from 'fs';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { detectPlatform, isMuxAvailable } from '../lib/platform.js';
 import type { HealthStatus } from '../lib/types.js';
-import { prepareMessagePayload } from '../lib/payloads.js';
 import {
   CLAUDE_MCP_INSTANCE_DIR,
   DEFAULT_WAIT_TIMEOUT_MS,
@@ -14,8 +12,11 @@ import {
 } from '../lib/constants.js';
 import { BrokerClient } from '../lib/broker-client.js';
 import { resolveWakeMethod } from '../lib/broker-client.js';
-import { collectRequiredAttachmentPaths, normalizeBatchSize, normalizeWaitMs, sendWakeup } from '../lib/adapter-utils.js';
+import { collectRequiredAttachmentPaths, normalizeBatchSize, normalizeWaitMs } from '../lib/adapter-utils.js';
+import { sendBridgeMessage } from '../lib/bridge-messenger.js';
 import { createStandbyLoop } from '../standby/loop.js';
+import { getWorkflowModelPolicy } from '../workflow/config.js';
+import { getWorkflowTools, handleWorkflowTool, hasActiveWorkflowTask } from '../workflow/mcp.js';
 import {
   registerCurrentInstance,
   listOtherLiveInstancePids,
@@ -25,6 +26,7 @@ import {
 const SERVER_START = new Date().toISOString();
 const startTime = Date.now();
 const INSTANCE_SLOT = new BrokerClient('claude').getSlot();
+const MODEL_POLICY = getWorkflowModelPolicy('claude');
 const AUTO_REPLY_DISABLED_BY_ENV = process.env.BRIDGE_DISABLE_AUTOREPLY === '1';
 let errorCount = 0;
 let lastError: string | undefined = undefined;
@@ -45,11 +47,11 @@ refreshSingleInstanceWarning({ warn: true });
 let standbyLoop: ReturnType<typeof createStandbyLoop> | null = null;
 
 const mcp = new Server(
-  { name: 'claude-mcp', version: '1.0.0' },
+  { name: 'claude-mcp', version: '3.1.0' },
   {
     capabilities: { tools: {}, logging: {} },
     instructions:
-      'To read new messages from Codex, call check_messages. When idle, prefer wait_for_messages so you can block until a new message arrives instead of polling. After each inbound message, assess it objectively, read any attachments with required=true before replying, and take the time needed to reason carefully before responding; the peer can wait up to 10 minutes. Send your response with send_message only when a response is warranted, and then call wait_for_messages again automatically. Continue that loop until the conversation has clearly concluded or the user explicitly wants it to stop. If you need to reset the conversation, call reset_session with confirm=true.',
+      'You are the lead architect in structured workflow tasks. Call get_active_task when a workflow task is mentioned. During discovery and design, inspect the project read-only and do not modify project source code. Submit complete design artifacts with submit_design. After Codex implementation, validate conformance with submit_validation and do not fix the code yourself. For ordinary bridge conversations, use check_messages, wait_for_messages, and send_message. Read every required attachment before replying. Reset only with reset_session(confirm=true).',
   },
 );
 const brokerClient = new BrokerClient('claude');
@@ -61,6 +63,11 @@ if (!AUTO_REPLY_DISABLED_BY_ENV) {
     brokerClient,
     server: mcp,
     isSingleInstanceSafe: () => !refreshSingleInstanceWarning(),
+    getPauseReason: () => hasActiveWorkflowTask(INSTANCE_SLOT)
+      ? 'structured workflow task active; main Claude session owns architecture work'
+      : undefined,
+    modelHint: MODEL_POLICY.model_hint,
+    requireModelMatch: MODEL_POLICY.require_model_match,
     logPrefix: '[claude-mcp]',
   });
 }
@@ -133,10 +140,42 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: 'Return server health and status information',
       inputSchema: { type: 'object', properties: {} },
     },
+    ...getWorkflowTools('claude'),
   ],
 }));
 
 mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const workflowResult = await handleWorkflowTool(
+    'claude',
+    request.params.name,
+    request.params.arguments,
+    INSTANCE_SLOT,
+  );
+  if (workflowResult.handled) {
+    let notificationResult: unknown;
+    if (workflowResult.notification) {
+      try {
+        notificationResult = await sendBridgeMessage({
+          brokerClient,
+          senderKind: 'claude',
+          recipientKind: workflowResult.notification.recipient,
+          text: workflowResult.notification.text,
+          wakeText: workflowResult.notification.wake_text,
+        });
+      } catch (error) {
+        errorCount++;
+        lastError = String(error);
+        notificationResult = { sent: false, error: String(error) };
+      }
+    }
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({ task: workflowResult.payload, notification: notificationResult }, null, 2),
+      }],
+    };
+  }
+
   if (request.params.name === 'check_messages' || request.params.name === 'wait_for_messages') {
     try {
       const { max_messages: requestedMaxMessages } = (request.params.arguments ?? {}) as { max_messages?: number };
@@ -207,9 +246,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
       wake_method: resolveWakeMethod(peer?.pane_target),
       multi_instance_warning: otherInstance,
       auto_reply_enabled: standbyStatus?.enabled,
-      auto_reply_disabled_reason: standbyStatus?.disabled_reason,
+      auto_reply_disabled_reason: standbyStatus?.disabled_reason ?? standbyStatus?.paused_reason,
       auto_reply_last_reply_at: standbyStatus?.last_reply_at,
       auto_reply_last_error: standbyStatus?.last_error,
+      auto_reply_last_model: standbyStatus?.last_model,
+      auto_reply_model_hint: MODEL_POLICY.model_hint,
     };
     return { content: [{ type: 'text', text: JSON.stringify(health, null, 2) }] };
   }
@@ -233,29 +274,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
   const text = (request.params.arguments as { text: string }).text;
 
   try {
-    const session = await brokerClient.ensureRegistered();
-    const messageId = randomUUID();
-    const preparedPayload = await prepareMessagePayload('claude', session.conversation_id, text, { messageId });
-    const enqueueResult = await brokerClient.enqueueMessage({
-      messageId,
+    const sendResult = await sendBridgeMessage({
+      brokerClient,
+      senderKind: 'claude',
       recipientKind: 'codex',
-      content: preparedPayload.content,
-      attachments: preparedPayload.attachments,
+      text,
+      wakeText: 'New message from Claude Code. Use check_messages tool to read it, then respond with send_message tool.',
     });
-
     lastMessageAt = new Date().toISOString();
-    const triggerSent = await sendWakeup(
-      enqueueResult.conversation_id,
-      'codex',
-      enqueueResult.recipient_wake_method,
-      enqueueResult.recipient_pane_target,
-      'New message from Claude Code. Use check_messages tool to read it, then respond with send_message tool.',
-    );
-
     return {
       content: [{
         type: 'text',
-        text: JSON.stringify({ sent: true, message_id: enqueueResult.message_id, trigger_sent: triggerSent }),
+        text: JSON.stringify(sendResult),
       }],
     };
   } catch (error) {

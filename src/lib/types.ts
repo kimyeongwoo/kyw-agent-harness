@@ -41,4 +41,6 @@ export interface HealthStatus {
   auto_reply_disabled_reason?: string;
   auto_reply_last_reply_at?: string;
   auto_reply_last_error?: string;
+  auto_reply_last_model?: string;
+  auto_reply_model_hint?: string;
 }

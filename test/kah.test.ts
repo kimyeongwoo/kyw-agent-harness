@@ -80,6 +80,46 @@ describe('kah init', () => {
     expect(mcpJson.mcpServers.bridge.args[0]).toBe(resolve(PACKAGE_ROOT, 'start-claude.ts').replace(/\\/g, '/'));
     expect(mcpJson.mcpServers.bridge.env?.BRIDGE_SLOT).toBe('demo');
   });
+
+  it('enables the Fable architect workflow and model policy', () => {
+    const root = createTempDir('kah-fable-test-');
+    tempDirs.push(root);
+    const workspace = resolve(root, 'workspace');
+    const homeDir = resolve(root, 'home');
+    mkdirSync(workspace, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+
+    const result = Bun.spawnSync([
+      process.execPath,
+      KAH_SCRIPT,
+      'init',
+      '--slot',
+      'design',
+      '--fable5',
+    ], {
+      cwd: workspace,
+      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+
+    expect(result.exitCode).toBe(0);
+    const mcpJson = JSON.parse(readText(resolve(workspace, '.mcp.json'))) as {
+      mcpServers: { bridge: { env: Record<string, string> } };
+    };
+    expect(mcpJson.mcpServers.bridge.env).toEqual({
+      BRIDGE_SLOT: 'design',
+      KAH_CLAUDE_MODEL_HINT: 'claude-fable-5',
+      KAH_CLAUDE_REQUIRE_MODEL_MATCH: '1',
+    });
+
+    const workflow = JSON.parse(readText(resolve(workspace, '.bridge', 'workflow.json')));
+    expect(workflow.claude.role).toBe('lead_architect');
+    expect(workflow.claude.model_hint).toBe('claude-fable-5');
+    expect(workflow.claude.require_model_match).toBe(true);
+    expect(workflow.codex.role).toBe('implementation_developer');
+    expect(workflow.require_user_approval).toBe(true);
+  });
 });
 
 describe('kah help', () => {

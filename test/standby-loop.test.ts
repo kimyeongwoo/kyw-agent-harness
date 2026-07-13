@@ -188,6 +188,70 @@ describe('createStandbyLoop', () => {
     expect(capturedParams.systemPrompt).toContain('peer can wait up to 10 minutes');
   });
 
+  it('pauses automatic sampling while a structured workflow task is active', async () => {
+    let pollCount = 0;
+    const loop = createStandbyLoop({
+      agentKind: 'claude',
+      brokerClient: {
+        pollInbox: async () => {
+          pollCount++;
+          return createPollResult();
+        },
+      } as any,
+      server: {
+        getClientCapabilities: () => ({ sampling: {} }),
+      } as any,
+      getPauseReason: () => 'structured workflow task active',
+      logPrefix: '[test-standby]',
+    });
+
+    loop.start();
+    await Bun.sleep(30);
+
+    expect(loop.getStatus().enabled).toBe(false);
+    expect(loop.getStatus().paused_reason).toContain('structured workflow');
+    expect(pollCount).toBe(0);
+    loop.stop();
+  });
+
+  it('uses a model hint and disables auto-reply when the sampled model does not match', async () => {
+    let capturedParams: any;
+    const loop = createStandbyLoop({
+      agentKind: 'claude',
+      brokerClient: {
+        pollInbox: async () => createPollResult(),
+        getHistory: async () => ({ messages: [], returned_messages: 0, has_more: false, limit: 12 }),
+        getReceiptState: async () => ({
+          conversation_id: 'conv_test',
+          recipient_kind: 'claude',
+          last_ack_seq: 0,
+          last_auto_reply_seq: 0,
+          updated_at: new Date().toISOString(),
+        }),
+      } as any,
+      server: {
+        createMessage: async (params: unknown) => {
+          capturedParams = params;
+          return {
+            model: 'claude-opus-4-8',
+            content: { type: 'text', text: 'Wrong model response.' },
+          };
+        },
+        getClientCapabilities: () => ({ sampling: {} }),
+      } as any,
+      modelHint: 'claude-fable-5',
+      requireModelMatch: true,
+      logPrefix: '[test-standby]',
+    });
+
+    loop.start();
+    await waitFor(() => loop.getStatus().disabled_reason !== undefined);
+
+    expect(capturedParams.modelPreferences.hints).toEqual([{ name: 'claude-fable-5' }]);
+    expect(loop.getStatus().last_model).toBe('claude-opus-4-8');
+    expect(loop.getStatus().disabled_reason).toContain('model mismatch');
+  });
+
   it('disables auto-reply when required attachments exceed the standby prompt budget', async () => {
     const acked: number[] = [];
     const enqueued: Array<{ content: string }> = [];

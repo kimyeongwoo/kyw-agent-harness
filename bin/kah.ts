@@ -6,6 +6,15 @@ import { buildCodexBridgeSection, upsertCodexBridgeConfig } from '../src/lib/cod
 import { syncHistory } from '../src/prompts/sync.js';
 import { exportPrompts } from '../src/prompts/export.js';
 import { listProjects } from '../src/prompts/list.js';
+import { WorkflowStore } from '../src/workflow/store.js';
+import {
+  createFableWorkflowConfig,
+  loadWorkflowConfig,
+  writeWorkflowConfig,
+} from '../src/workflow/config.js';
+import { inspectBrokerWorkspace, readBrokerHealthForWorkspace, resolveWakeMethod } from '../src/lib/broker-client.js';
+import { sendWakeup } from '../src/lib/adapter-utils.js';
+import { DEFAULT_BRIDGE_SLOT } from '../src/lib/constants.js';
 import {
   HISTORY_JSONL_PATH,
   PROMPT_HISTORY_DIR,
@@ -70,6 +79,12 @@ switch (command) {
   case 'prompts':
     cmdPrompts();
     break;
+  case 'task':
+    await cmdTask();
+    break;
+  case 'doctor':
+    await cmdDoctor();
+    break;
   default:
     printUsage();
 }
@@ -78,11 +93,13 @@ function printUsage(): void {
   console.log(`kyw_agent_harness (kah) — Bridge between Claude Code and Codex CLI
 
 Usage:
-  kah init [--slot name]    Configure MCP servers for current directory
+  kah init [--slot name] [--fable5]  Configure MCP servers and optional Fable workflow
   kah statusline            Install HUD status line for Claude Code
   kah prompts <command>     Manage prompt history (sync, export, list)
+  kah task <command>        Run Fable design -> approval -> Codex implementation workflows
+  kah doctor                Diagnose bridge and workflow readiness
 
-Run 'kah prompts' for subcommand help.`);
+Run 'kah prompts' or 'kah task' for subcommand help.`);
 }
 
 async function cmdInit(): Promise<void> {
@@ -90,6 +107,7 @@ async function cmdInit(): Promise<void> {
   const slotValue = readFlagValue('--slot');
   const bunCommand = resolveBunCommand();
   const bridgeWorkspaceRoot = resolveBridgeWorkspaceRoot(cwd);
+  const enableFableWorkflow = process.argv.includes('--fable5');
 
   console.log(`[kah] Initializing kyw_agent_harness in ${cwd}\n`);
   if (slotValue) console.log(`  Slot: ${slotValue}\n`);
@@ -102,8 +120,14 @@ async function cmdInit(): Promise<void> {
     command: bunCommand,
     args: [claudeServerPath],
   };
-  if (slotValue) {
-    bridgeServer.env = { [BRIDGE_SLOT_ENV]: slotValue };
+  const claudeEnv: Record<string, string> = {};
+  if (slotValue) claudeEnv[BRIDGE_SLOT_ENV] = slotValue;
+  if (enableFableWorkflow) {
+    claudeEnv.KAH_CLAUDE_MODEL_HINT = 'claude-fable-5';
+    claudeEnv.KAH_CLAUDE_REQUIRE_MODEL_MATCH = '1';
+  }
+  if (Object.keys(claudeEnv).length > 0) {
+    bridgeServer.env = claudeEnv;
   }
 
   if (existsSync(mcpJsonPath)) {
@@ -169,6 +193,15 @@ async function cmdInit(): Promise<void> {
   const bridgeDir = resolve(bridgeWorkspaceRoot, '.bridge');
   mkdirSync(bridgeDir, { recursive: true });
   console.log(`  Created: ${bridgeDir}\n`);
+
+  if (enableFableWorkflow) {
+    const workflowConfigPath = resolve(bridgeDir, 'workflow.json');
+    writeWorkflowConfig(createFableWorkflowConfig(), workflowConfigPath);
+    console.log(`[workflow] Fable 5 architect workflow enabled: ${workflowConfigPath}`);
+    console.log('  Claude role: lead architect (read-only design)');
+    console.log('  Codex role: design reviewer and implementation developer');
+    console.log('  User approval is required before implementation.\n');
+  }
 
   console.log("Done. Start Claude and Codex in separate terminals to begin.");
 }
@@ -287,4 +320,188 @@ function readFlagValue(flag: string): string | undefined {
   if (index === -1) return undefined;
   const value = process.argv[index + 1];
   return value && !value.startsWith('--') ? value : undefined;
+}
+
+async function cmdTask(): Promise<void> {
+  const subcommand = process.argv[3];
+  const workspaceRoot = resolveBridgeWorkspaceRoot(process.cwd());
+  const store = new WorkflowStore(workspaceRoot);
+  const slot = readFlagValue('--slot') ?? process.env.BRIDGE_SLOT ?? DEFAULT_BRIDGE_SLOT;
+
+  try {
+    switch (subcommand) {
+      case 'create': {
+        const type = readFlagValue('--type');
+        const title = readFlagValue('--title');
+        const goalFlag = readFlagValue('--goal');
+        const briefPath = readFlagValue('--brief');
+        const goal = goalFlag ?? (briefPath ? readFileSync(resolve(process.cwd(), briefPath), 'utf-8') : undefined);
+        if (type !== 'greenfield' && type !== 'existing-change') {
+          throw new Error("--type must be 'greenfield' or 'existing-change'.");
+        }
+        if (!title) throw new Error('--title is required.');
+        if (!goal) throw new Error('Provide --goal <text> or --brief <markdown-file>.');
+
+        const task = await store.createTask({ type, title, goal, slot });
+        console.log(`[kah] Created workflow task ${task.task_id}`);
+        printTaskSummary(task);
+        const woke = await wakeWorkflowAgent(
+          workspaceRoot,
+          task.slot,
+          'claude',
+          `New architecture task ${task.task_id} is ready. Call get_active_task, inspect the project read-only, and follow the Claude next_action.`,
+        );
+        console.log(`  Claude wake: ${woke ? 'sent' : 'not available; start or prompt Claude manually'}`);
+        break;
+      }
+      case 'list': {
+        const tasks = store.listTasks();
+        if (tasks.length === 0) {
+          console.log('[kah] No workflow tasks found.');
+          break;
+        }
+        console.log('[kah] Workflow tasks:\n');
+        for (const task of tasks) {
+          console.log(`  ${task.task_id}  ${task.status.padEnd(29)}  ${task.type.padEnd(15)}  ${task.title}`);
+        }
+        break;
+      }
+      case 'status': {
+        const taskId = process.argv[4];
+        const task = taskId && !taskId.startsWith('--') ? store.getTask(taskId) : store.getActiveTask(slot);
+        if (!task) {
+          console.log(`[kah] No active workflow task for slot '${slot}'.`);
+          break;
+        }
+        printTaskSummary(task, true);
+        break;
+      }
+      case 'approve': {
+        const taskId = requiredTaskId();
+        const task = await store.approveTask(taskId);
+        console.log(`[kah] Approved ${task.task_id} design v${task.design_version}.`);
+        const woke = await wakeWorkflowAgent(
+          workspaceRoot,
+          task.slot,
+          'codex',
+          `User approved workflow task ${task.task_id} design v${task.design_version}. Call get_active_task, then start_implementation before modifying source code.`,
+        );
+        console.log(`  Codex wake: ${woke ? 'sent' : 'not available; start or prompt Codex manually'}`);
+        break;
+      }
+      case 'request-changes': {
+        const taskId = requiredTaskId();
+        const reason = readFlagValue('--reason');
+        if (!reason) throw new Error('--reason is required.');
+        const task = await store.requestUserChanges(taskId, reason);
+        console.log(`[kah] Returned ${task.task_id} to Fable design.`);
+        await wakeWorkflowAgent(
+          workspaceRoot,
+          task.slot,
+          'claude',
+          `User requested design changes for ${task.task_id}: ${reason}. Call get_active_task and submit a revised design.`,
+        );
+        break;
+      }
+      case 'complete': {
+        const task = await store.completeTask(requiredTaskId());
+        console.log(`[kah] Completed workflow task ${task.task_id}.`);
+        break;
+      }
+      case 'cancel': {
+        const task = await store.cancelTask(requiredTaskId(), readFlagValue('--reason'));
+        console.log(`[kah] Cancelled workflow task ${task.task_id}.`);
+        break;
+      }
+      default:
+        printTaskUsage();
+    }
+  } catch (error) {
+    console.error(`[kah] Task error: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
+}
+
+function requiredTaskId(): string {
+  const taskId = process.argv[4];
+  if (!taskId || taskId.startsWith('--')) throw new Error('A task ID is required.');
+  return taskId;
+}
+
+function printTaskSummary(task: ReturnType<WorkflowStore['getTask']>, verbose = false): void {
+  console.log(`  Task ID: ${task.task_id}`);
+  console.log(`  Title: ${task.title}`);
+  console.log(`  Type: ${task.type}`);
+  console.log(`  Status: ${task.status}`);
+  console.log(`  Slot: ${task.slot}`);
+  console.log(`  Design version: ${task.design_version}${task.approved_design_version ? ` (approved v${task.approved_design_version})` : ''}`);
+  console.log(`  Base commit: ${task.base_commit ?? '(none)'}`);
+  console.log(`  Dirty at creation: ${task.dirty_at_creation ? 'yes' : 'no'}`);
+  if (verbose) {
+    console.log(`  Goal: ${task.goal}`);
+    console.log(`  Artifacts:`);
+    for (const artifact of task.artifacts) {
+      console.log(`    - ${artifact.kind} v${artifact.version}: ${artifact.path}`);
+    }
+    const latestEvent = task.events[task.events.length - 1];
+    if (latestEvent) console.log(`  Latest event: ${latestEvent.actor}/${latestEvent.action} at ${latestEvent.created_at}`);
+  }
+}
+
+function printTaskUsage(): void {
+  console.log(`Usage:
+  kah task create --type <greenfield|existing-change> --title <text> (--goal <text> | --brief <file>) [--slot <name>]
+  kah task list
+  kah task status [task-id] [--slot <name>]
+  kah task approve <task-id>
+  kah task request-changes <task-id> --reason <text>
+  kah task complete <task-id>
+  kah task cancel <task-id> [--reason <text>]
+
+Workflow:
+  Fable discovery/design -> Codex design review -> user approval -> Codex implementation
+  -> Fable validation -> user completion approval`);
+}
+
+async function wakeWorkflowAgent(
+  workspaceRoot: string,
+  slot: string,
+  agentKind: 'claude' | 'codex',
+  text: string,
+): Promise<boolean> {
+  try {
+    const inspection = await inspectBrokerWorkspace(workspaceRoot, { slot });
+    const conversation = inspection.active_conversations[0];
+    const peer = conversation?.peers.find((candidate) => candidate.agent_kind === agentKind && candidate.status === 'active');
+    if (!conversation || !peer?.pane_target) return false;
+    return await sendWakeup(
+      conversation.conversation_id,
+      agentKind,
+      resolveWakeMethod(peer.pane_target),
+      peer.pane_target,
+      text,
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function cmdDoctor(): Promise<void> {
+  const workspaceRoot = resolveBridgeWorkspaceRoot(process.cwd());
+  const configPath = resolve(workspaceRoot, '.bridge', 'workflow.json');
+  const config = loadWorkflowConfig(configPath);
+  const store = new WorkflowStore(workspaceRoot);
+  const activeTask = store.getActiveTask();
+  const bun = Bun.spawnSync(['bun', '--version'], { stdout: 'pipe', stderr: 'ignore' });
+  const broker = await readBrokerHealthForWorkspace(workspaceRoot);
+
+  console.log('[kah] Doctor\n');
+  console.log(`  [${bun.exitCode === 0 ? 'OK' : 'FAIL'}] Bun ${bun.exitCode === 0 ? bun.stdout.toString().trim() : 'not available'}`);
+  console.log(`  [OK] Workspace: ${workspaceRoot}`);
+  console.log(`  [${existsSync(configPath) ? 'OK' : 'WARN'}] Workflow config: ${configPath}`);
+  console.log(`  [${broker ? 'OK' : 'INFO'}] Broker: ${broker ? `pid ${broker.pid}, port ${broker.port}` : 'not running'}`);
+  console.log(`  [${config.claude.model_hint ? 'OK' : 'WARN'}] Claude model hint: ${config.claude.model_hint ?? 'not configured'}`);
+  console.log(`  [${config.claude.require_model_match ? 'OK' : 'WARN'}] Sampling model match: ${config.claude.require_model_match ? 'required' : 'not required'}`);
+  console.log(`  [${activeTask ? 'INFO' : 'OK'}] Active task: ${activeTask ? `${activeTask.task_id} (${activeTask.status})` : 'none'}`);
+  console.log('\n  Note: MCP can verify background sampling results, but cannot prove the model selected in an interactive Claude session. Confirm Claude shows Fable 5 before starting design work.');
 }

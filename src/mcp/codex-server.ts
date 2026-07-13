@@ -3,12 +3,14 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { HealthStatus } from '../lib/types.js';
-import { prepareMessagePayload } from '../lib/payloads.js';
 import { detectPlatform, isMuxAvailable } from '../lib/platform.js';
 import { BrokerClient } from '../lib/broker-client.js';
 import { resolveWakeMethod } from '../lib/broker-client.js';
-import { collectRequiredAttachmentPaths, normalizeBatchSize, normalizeWaitMs, sendWakeup } from '../lib/adapter-utils.js';
+import { collectRequiredAttachmentPaths, normalizeBatchSize, normalizeWaitMs } from '../lib/adapter-utils.js';
+import { sendBridgeMessage } from '../lib/bridge-messenger.js';
 import { createStandbyLoop } from '../standby/loop.js';
+import { getWorkflowModelPolicy } from '../workflow/config.js';
+import { getWorkflowTools, handleWorkflowTool, hasActiveWorkflowTask } from '../workflow/mcp.js';
 import {
   CODEX_MCP_INSTANCE_DIR,
   DEFAULT_MESSAGE_BATCH_SIZE,
@@ -24,6 +26,7 @@ import {
 
 const SERVER_NAME = 'codex-mcp' as const;
 const INSTANCE_SLOT = new BrokerClient('codex').getSlot();
+const MODEL_POLICY = getWorkflowModelPolicy('codex');
 const AUTO_REPLY_DISABLED_BY_ENV = process.env.BRIDGE_DISABLE_AUTOREPLY === '1';
 const startTime = Date.now();
 let errorCount = 0;
@@ -43,11 +46,11 @@ function refreshSingleInstanceWarning(opts?: { warn?: boolean }): boolean {
 refreshSingleInstanceWarning({ warn: true });
 
 const server = new Server(
-  { name: 'codex-mcp', version: '1.0.0' },
+  { name: 'codex-mcp', version: '3.1.0' },
   {
     capabilities: { tools: {}, logging: {} },
     instructions:
-      'To read new messages from Claude, call check_messages. When idle, prefer wait_for_messages so you can block until a new message arrives instead of polling. After each inbound message, assess it objectively, read any attachments with required=true before replying, and take the time needed to reason carefully before responding; the peer can wait up to 10 minutes. Send your response with send_message only when a response is warranted, and then call wait_for_messages again automatically. Continue that loop until the conversation has clearly concluded or the user explicitly wants it to stop. If you need to reset the conversation, call reset_session with confirm=true.',
+      'You are the design reviewer and implementation developer in structured workflow tasks. Call get_active_task when a workflow task is mentioned. Review designs read-only with submit_design_review. Never modify project source until the user has approved the design and start_implementation succeeds. Implement only the approved design. If the design is flawed, call request_design_change instead of silently redesigning. Report changes and tests with report_implementation. For ordinary bridge conversations, use check_messages, wait_for_messages, and send_message. Read every required attachment before replying.',
   },
 );
 const brokerClient = new BrokerClient('codex');
@@ -61,6 +64,11 @@ if (!AUTO_REPLY_DISABLED_BY_ENV) {
     brokerClient,
     server,
     isSingleInstanceSafe: () => !refreshSingleInstanceWarning(),
+    getPauseReason: () => hasActiveWorkflowTask(INSTANCE_SLOT)
+      ? 'structured workflow task active; main Codex session owns review and implementation work'
+      : undefined,
+    modelHint: MODEL_POLICY.model_hint,
+    requireModelMatch: MODEL_POLICY.require_model_match,
     logPrefix: '[codex-mcp]',
   });
 }
@@ -133,11 +141,38 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: 'Returns server health status.',
       inputSchema: { type: 'object', properties: {} },
     },
+    ...getWorkflowTools('codex'),
   ],
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+
+  const workflowResult = await handleWorkflowTool('codex', name, args, INSTANCE_SLOT);
+  if (workflowResult.handled) {
+    let notificationResult: unknown;
+    if (workflowResult.notification) {
+      try {
+        notificationResult = await sendBridgeMessage({
+          brokerClient,
+          senderKind: 'codex',
+          recipientKind: workflowResult.notification.recipient,
+          text: workflowResult.notification.text,
+          wakeText: workflowResult.notification.wake_text,
+        });
+      } catch (error) {
+        errorCount++;
+        lastError = String(error);
+        notificationResult = { sent: false, error: String(error) };
+      }
+    }
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({ task: workflowResult.payload, notification: notificationResult }, null, 2),
+      }],
+    };
+  }
 
   if (name === 'check_messages' || name === 'wait_for_messages') {
     try {
@@ -187,29 +222,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const text = (args as { text: string }).text;
 
     try {
-      const session = await brokerClient.ensureRegistered();
-      const messageId = crypto.randomUUID();
-      const preparedPayload = await prepareMessagePayload('codex', session.conversation_id, text, { messageId });
-      const enqueueResult = await brokerClient.enqueueMessage({
-        messageId,
+      const sendResult = await sendBridgeMessage({
+        brokerClient,
+        senderKind: 'codex',
         recipientKind: 'claude',
-        content: preparedPayload.content,
-        attachments: preparedPayload.attachments,
+        text,
+        wakeText: 'New message from Codex. Use check_messages tool to read it.',
       });
-
       lastMessageAt = new Date().toISOString();
-      const triggerSent = await sendWakeup(
-        enqueueResult.conversation_id,
-        'claude',
-        enqueueResult.recipient_wake_method,
-        enqueueResult.recipient_pane_target,
-        'New message from Codex. Use check_messages tool to read it.',
-      );
-
       return {
         content: [{
           type: 'text',
-          text: JSON.stringify({ sent: true, message_id: enqueueResult.message_id, trigger_sent: triggerSent }),
+          text: JSON.stringify(sendResult),
         }],
       };
     } catch (e) {
@@ -257,9 +281,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       wake_method: resolveWakeMethod(peer?.pane_target),
       multi_instance_warning: otherInstance,
       auto_reply_enabled: standbyStatus?.enabled,
-      auto_reply_disabled_reason: standbyStatus?.disabled_reason,
+      auto_reply_disabled_reason: standbyStatus?.disabled_reason ?? standbyStatus?.paused_reason,
       auto_reply_last_reply_at: standbyStatus?.last_reply_at,
       auto_reply_last_error: standbyStatus?.last_error,
+      auto_reply_last_model: standbyStatus?.last_model,
+      auto_reply_model_hint: MODEL_POLICY.model_hint,
     };
     return { content: [{ type: 'text', text: JSON.stringify(health) }] };
   }

@@ -1,6 +1,23 @@
 {
   "name": "@kimyw/kyw-agent-harness",
-  "version": "3.0.0",
+  "version": "3.1.0",
+  "description": "Local MCP bridge with an approval-gated Claude Fable 5 design and Codex implementation workflow",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "mcp",
+    "agent-workflow",
+    "ai-agents",
+    "developer-tools"
+  ],
+  "homepage": "https://github.com/kimyeongwoo/kyw-agent-harness#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kimyeongwoo/kyw-agent-harness.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kimyeongwoo/kyw-agent-harness/issues"
+  },
   "type": "module",
   "publishConfig": {
     "access": "public"
